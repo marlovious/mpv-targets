@@ -731,6 +731,11 @@ no v2 source file is a required implementation dependency.
 The new repository begins with this specification and its tests. No source is
 copied from the abandoned worktrees.
 
+The answer-file deployer is developed in lockstep with configuration and
+profiles. It is not a post-hoc packaging task. The first physical target-host
+installation uses the same answer file, profile, and deployment command that a
+user receives; there is no private hand-built Bipper setup path.
+
 1. Create the package layout, protocol types, protocol serialization tests, and
    `mpv_targets` public API.
 2. Implement daemon configuration, atomic persistent mutations, and answer-file
