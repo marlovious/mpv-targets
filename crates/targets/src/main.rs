@@ -62,7 +62,7 @@ async fn run() -> Result<(), String> {
         "set-channel" | "clear-channel" => channel(&client, &command, &args).await,
         "play" | "pause" | "toggle-play" | "loadfile" | "next" | "previous" | "mute" | "unmute"
         | "toggle-mute" | "fullscreen" | "loop" | "repeat" | "shuffle" | "unshuffle"
-        | "cycle-audio" | "cycle-subtitle" | "disable-subtitle" => {
+        | "cycle-audio" | "cycle-subtitle" | "toggle-subtitle" => {
             mpv_action(&client, &command, &args).await
         }
         _ => Err(format!("unknown command `{command}`; use `targets help`")),
@@ -204,7 +204,7 @@ fn validate_command_args(command: &str, args: &[String]) -> Result<(), String> {
         "loadfile" => exact(&[&["<target>", "<source>"]]),
         "play" | "pause" | "toggle-play" | "next" | "previous" | "mute" | "unmute"
         | "toggle-mute" | "fullscreen" | "loop" | "repeat" | "shuffle" | "unshuffle"
-        | "cycle-audio" | "cycle-subtitle" | "disable-subtitle" => exact(&[&["<target>"]]),
+        | "cycle-audio" | "cycle-subtitle" | "toggle-subtitle" => exact(&[&["<target>"]]),
         "identify" => args.is_empty(),
         "mpv" => args.len() >= 2,
         _ => return Err(format!("unknown command `{command}`; use `targets help`")),
@@ -535,7 +535,7 @@ async fn mpv_action(client: &RemoteClient, command: &str, args: &[String]) -> Re
     let target = args.first().ok_or("target is required")?;
     let accepts_all = !matches!(
         command,
-        "loadfile" | "cycle-audio" | "cycle-subtitle" | "disable-subtitle"
+        "loadfile" | "cycle-audio" | "cycle-subtitle" | "toggle-subtitle"
     );
     let snapshot = client
         .snapshot()
@@ -628,7 +628,7 @@ async fn mpv_action(client: &RemoteClient, command: &str, args: &[String]) -> Re
             "unshuffle" => target_client.unshuffle().await,
             "cycle-audio" => target_client.cycle_audio().await,
             "cycle-subtitle" => target_client.cycle_subtitle().await,
-            "disable-subtitle" => target_client.disable_subtitle().await,
+            "toggle-subtitle" => target_client.toggle_subtitle().await,
             _ => unreachable!(),
         }
         .map_err(|e| e.to_string())?;
@@ -920,7 +920,7 @@ fn take_option(args: &mut Vec<String>, option: &str) -> Result<Option<String>, S
 }
 fn print_help() {
     println!(
-        "targets [--url WSS_URL] <command>\n\nstatus [target] [--json]\nadd <target> [--from TARGET] [--channel NAME_OR_PATH_OR_URL] [--enable] [--start]\nremove <target> [--yes]\nstart|stop|restart <target>\nenable <target> [--start]\ndisable <target> [--stop]\nrename <target> <new-target> [--yes]\nshow-channels [@node]  list files in the node channel directory\nset-channel <target> <number|name|path-or-url> [--restart]  select the target channel\nclear-channel <target> [--restart]  clear the target channel\nplaylist <target> [item]  show or jump the current mpv playlist\nplay|pause|toggle-play <target|all>\nloadfile <target> <path-or-url>\nnext|previous <target|all>\nmute|unmute|toggle-mute <target|all>\nfullscreen|loop|repeat|shuffle|unshuffle <target|all>\ncycle-audio|cycle-subtitle|disable-subtitle <target>\nidentify [@node]\nmpv <target> <allowed-native-command> [args...]"
+        "targets [--url WSS_URL] <command>\n\nstatus [target] [--json]\nadd <target> [--from TARGET] [--channel NAME_OR_PATH_OR_URL] [--enable] [--start]\nremove <target> [--yes]\nstart|stop|restart <target>\nenable <target> [--start]\ndisable <target> [--stop]\nrename <target> <new-target> [--yes]\nshow-channels [@node]  list files in the node channel directory\nset-channel <target> <number|name|path-or-url> [--restart]  select the target channel\nclear-channel <target> [--restart]  clear the target channel\nplaylist <target> [item]  show or jump the current mpv playlist\nplay|pause|toggle-play <target|all>\nloadfile <target> <path-or-url>\nnext|previous <target|all>\nmute|unmute|toggle-mute <target|all>\nfullscreen|loop|repeat|shuffle|unshuffle <target|all>\ncycle-audio|cycle-subtitle|toggle-subtitle <target>\nidentify [@node]\nmpv <target> <allowed-native-command> [args...]"
     );
 }
 
@@ -970,6 +970,8 @@ mod tests {
             )
             .is_ok()
         );
+        assert!(validate_command_args("toggle-subtitle", &args(&["music"])).is_ok());
+        assert!(validate_command_args("disable-subtitle", &args(&["music"])).is_err());
     }
 
     #[test]

@@ -590,7 +590,7 @@ targets shuffle <target|all>
 targets unshuffle <target|all>
 targets cycle-audio <target>
 targets cycle-subtitle <target>
-targets disable-subtitle <target>
+targets toggle-subtitle <target>
 targets playlist <target> [item]
 targets identify [@node]
 

@@ -519,15 +519,9 @@ impl TargetClient {
     pub async fn cycle_subtitle(&self) -> Result<Response, ClientError> {
         self.mpv("cycle", vec![serde_json::json!("sid")]).await
     }
-    pub async fn disable_subtitle(&self) -> Result<Response, ClientError> {
-        self.mpv(
-            "set_property",
-            vec![
-                serde_json::json!("sub-visibility"),
-                serde_json::json!(false),
-            ],
-        )
-        .await
+    pub async fn toggle_subtitle(&self) -> Result<Response, ClientError> {
+        self.mpv("cycle", vec![serde_json::json!("sub-visibility")])
+            .await
     }
     pub async fn subtitle_visibility(&self, visible: bool) -> Result<Response, ClientError> {
         self.mpv(
