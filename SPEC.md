@@ -41,7 +41,7 @@ The preserved public behavior includes:
 
 - named local and remote targets;
 - local files, URLs, and local or remote M3U playlists;
-- configured startup playlists;
+- configured channels;
 - target state snapshots, including current title, playback, mute, and online
   state;
 - mpv lifecycle: start, stop, restart, recovery, and safe reattachment;
@@ -62,6 +62,7 @@ explicit amendment to this specification.
 repository and package: mpv-targets
 daemon binary:          mpv-targetsd
 operator binary:        targets
+deployment binary:      deploy-targets
 Rust library:           mpv_targets
 ```
 
@@ -124,6 +125,7 @@ The default XDG layout for the service user is:
 ```text
 ~/.config/mpv-targets/
 ├── mpv-targets.toml
+├── channels/
 ├── tls/
 │   ├── server.crt
 │   └── server.key
@@ -151,6 +153,12 @@ A target name is its stable, user-facing identifier. It is the name used in
 configuration, the protocol, the `targets` CLI, directories, sockets, and
 operator scripts. There is no separate display-name identity in v1.
 
+Target names use lowercase ASCII letters, digits, dashes (`-`), and underscores
+(`_`), are 1–64 characters long, and begin with a letter or digit. `all` is
+reserved for the operator bulk selector and cannot be a target name. This one
+portable directory-safe rule is validated only when configuration is loaded or
+changed; targets otherwise remain opaque names.
+
 The daemon configuration owns only service-level target fields:
 
 ```toml
@@ -164,18 +172,25 @@ private_key = "tls/server.key"
 
 [[targets]]
 name = "music"
-startup_playlist = "/home/mpv-targets/premiumize/music.m3u8"
+channel = "/home/mpv-targets/premiumize/music.m3u8"
 # disabled = false
 ```
 
 `disabled` defaults to `false`. Its meaning and the corresponding live
 lifecycle operations are defined in the next section.
 
-`startup_playlist` is optional. It is either an absolute local path or a URL.
-The daemon passes URLs to mpv unchanged. It does not download, inspect, or
-validate playlist contents. The answer-file deployer resolves any relative
-source it installs before writing the daemon configuration, so daemon runtime
-configuration contains no ambiguous relative playlist paths.
+`channel` is optional runtime configuration. A channel is an M3U playlist
+selected as a target's persistent source. A target with no selected channel
+still launches normally and leaves mpv idle. A local channel is an absolute
+`.m3u` or `.m3u8` path; a channel URL is passed to mpv unchanged. The daemon
+does not download, inspect, or validate playlist contents.
+
+The node's shared `channels/` directory is the conventional publication point
+for target-managed channels. Deployment creates it empty. Direct `.m3u` and
+`.m3u8` files in that directory are discoverable through the public channel
+list and may be selected by name or number. Any target may select any channel
+in the shared catalog. Operators may also select an external absolute M3U path
+or URL explicitly; external channels are not copied or imported.
 
 Target `mpv.conf` remains ordinary native mpv configuration. It owns the
 launch posture, including `pause=yes` or `pause=no`, plus all platform-specific
@@ -184,22 +199,48 @@ mpv options in its protocol configuration.
 
 ### 6.4 Answer-file contract
 
-The answer file is intentionally small. It declares:
+The answer file is intentionally small and uses TOML. It declares:
 
 - node id and listener address;
+- an optional `host_profile` selecting deployment assets. It defaults to
+  `generic`; specialized values such as `nuc` or `pi` are optional and must be
+  explained in the commented answer-file template;
 - TLS input or self-signed certificate generation;
-- initial targets, their `disabled` state, and startup playlists;
-- the source content for each target's ordinary `mpv.conf`;
-- the user service installation details.
+- initial targets and their `disabled` state;
+- each target's initial paused, muted, and volume values, from which deployment
+  generates its small target-local `mpv.conf` baseline;
+- whether to install/start the systemd user service for the deploying user.
 
-It does not declare remote nodes, client address books, media discovery,
-playlist construction, stream credentials, or client UI choices.
+It does not declare remote nodes, client address books, channel files or
+selected channel paths, stream credentials, imported `mpv.conf` files, or
+client UI choices. Deployment creates one empty shared `channels/` directory.
+The service lists managed channels from that directory, and `targets
+set-channel` selects one for a target. An external absolute M3U path or URL may
+also be selected explicitly. After deployment, advanced mpv settings belong
+directly in the target-local `mpv.conf`; the service does not reinterpret them.
 
-Deployment is non-interactive. It validates all input before changing the
-target host, then creates or updates only its declared service configuration,
-target configuration, TLS material, and user service unit. It does not delete
-playlists, scripts, logs, or unrelated files. Any replacement behavior must be
-an explicit command and state exactly which files it will replace.
+The answer file carries this last choice as `service.install = true` or
+`false`; it is required rather than prompted for. When `true`, deployment
+installs and starts the user service, then shows its `systemctl --user status`.
+When `false`, deployment materializes the declared files, reports where they
+were saved, and prints the manual service-start command. In either case the
+user service belongs to the user running deployment. Deployment installs the
+daemon executable beside the user's other local executables at
+`~/.local/bin/mpv-targetsd`. The deployer takes that executable from the same
+directory as `deploy-targets` and rejects the deployment during preflight if it
+is absent.
+
+Deployment is non-interactive. `deploy-targets <answer-file>` is its public
+command. It validates all input before changing the target host. If the target
+configuration root already exists, it fails with a clear instruction to use
+`--overwrite`. With `deploy-targets --overwrite <answer-file>`, it validates
+everything first, then requires an interactive `y` confirmation and replaces the entire declared
+`mpv-targets` configuration root, including target configuration, scripts,
+channels, and TLS material. It does not touch state/log files outside that
+root or unrelated files elsewhere on the host. A non-terminal overwrite fails
+because it cannot obtain the confirmation. The overwrite flag is the explicit
+replacement declaration, and the confirmation is never bypassed by another
+flag.
 
 Self-signed TLS is a supported default deployment mode. The deployer may
 generate one certificate and private key for the node, or install an explicitly
@@ -250,7 +291,7 @@ The service exposes these target operations:
 | `restart` | Stops and relaunches an enabled target. For a disabled target, it ensures the target is stopped and does not relaunch it. |
 | `enable` | Persists `disabled = false`; it does not itself launch the target. |
 | `disable` | Persists `disabled = true`; it does not itself stop a currently running target. |
-| `set-startup-playlist` | Persists the startup playlist; optional restart applies it immediately. |
+| `set-channel` | Persists the target's selected channel; optional restart applies it immediately. |
 
 The `targets` CLI may compose existing operations for ergonomic forms such as
 `targets disable music --stop` and `targets enable music --start`. Those are
@@ -293,6 +334,16 @@ Request shape:
 }
 ```
 
+Target and native mpv operations require `target`. The node-level channel-list
+operation omits it:
+
+```json
+{
+  "id": "client-43",
+  "operation": { "kind": "node_list_channels" }
+}
+```
+
 Response shape:
 
 ```json
@@ -313,29 +364,41 @@ mpv commands:
 target_start
 target_stop
 target_restart
+target_add
+target_remove
 target_enable
 target_disable
 target_rename
-target_set_startup_playlist
+target_set_channel
+node_list_channels
 ```
 
-`target_set_startup_playlist` carries `playlist` (a string or `null`) and an
-explicit `restart` boolean. Its success data reports the persisted playlist,
+`target_set_channel` carries `channel` (a string or `null`) and an explicit
+`restart` boolean. Its success data reports the persisted channel,
 whether restart was requested, and whether restart completed.
+
+`node_list_channels` returns the sorted managed channels from the node's shared
+`channels/` directory. It is the only v1 operation without a target.
+
+`target_remove` stops the target if necessary, removes its target configuration
+directory, and removes it from daemon configuration. The operator command shows
+the target and directory and requires `y/N` confirmation; Enter makes no
+change. Non-interactive removal requires explicit `--yes`.
 
 `target_rename` carries one validated replacement name. It is an atomic service
 operation: the daemon updates target configuration and its target configuration
 directory, preserves `mpv.conf` and scripts, and reports the old and new name.
-An enabled rename always stops the old target identity and starts the new target
-identity. A disabled rename remains disabled and does not launch a pane. There
-is no soft rename or skip-restart option for enabled targets. A failed rename
-leaves the old target intact. Its success data reports `from`, `to`, and
-`restarted`. `all` is reserved as the operator bulk selector and cannot be a
-target name.
+The target must already be stopped; a running target is rejected without any
+change. Rename never stops or starts a target. A disabled target is already
+stopped and can be renamed directly. An enabled target remains stopped after
+rename and runs under its new name only after an explicit start or a later
+daemon restart. A failed rename leaves the old target intact. Its success data
+reports `from` and `to`. `all` is reserved as the operator bulk selector and
+cannot be a target name.
 
 Service-operation responses are small, stable facts: stopped/online state for
-lifecycle operations, `disabled` for enable/disable, and playlist/restart facts
-for startup-playlist mutation. They do not pretend to report eventual media
+lifecycle operations, `disabled` for enable/disable, and channel/restart facts
+for channel mutation. They do not pretend to report eventual media
 playback success.
 
 ### 8.3 Native mpv operation
@@ -385,7 +448,7 @@ The initial message is a `snapshot` event. It contains:
 - one target record per configured target.
 
 A target record contains its authoritative name; `disabled`, `stopped`, and
-`online` state; startup playlist; observed playback fields; and a monotonic
+`online` state; selected channel; observed playback fields; and a monotonic
 revision. Observed playback fields include paused, muted, volume, title,
 playlist position/count, idle state, duration/position, loop settings, and
 audio/subtitle track information.
@@ -394,6 +457,11 @@ The daemon emits `target_changed` events containing a target name, next
 revision, and only changed fields. Clients apply them in order to their cached
 snapshot. A revision gap is a protocol failure: the client must reconnect and
 obtain a fresh snapshot rather than guessing state.
+
+After the uncommon topology operations `target_add`, `target_remove`, and
+`target_rename`, the daemon emits one complete replacement snapshot so clients
+can replace the target set without a second topology-event vocabulary. It does
+not emit periodic replacement snapshots.
 
 `targets_expected_online` counts targets that are both enabled and not
 intentionally stopped. `targets_online` counts those expected targets that are
@@ -415,6 +483,10 @@ Timeout means the requester did not observe a terminal response. It does not
 cancel a command that may already have reached the daemon; the eventual state
 must be observed through a new snapshot or event.
 
+The shared client waits at most 15 seconds for a correlated response. Its
+explicit `close` sends a WebSocket close frame and terminates the connection
+task; it does not merely mark the client disconnected locally.
+
 ### 8.6 Shared Rust library
 
 `mpv_targets` is the canonical client-facing Rust library. The daemon and
@@ -428,6 +500,7 @@ client.snapshot()
 client.subscribe()
 client.disconnected()
 client.close()
+client.list_channels()
 ```
 
 It owns one reader/writer connection task, request correlation, the current
@@ -477,13 +550,11 @@ The optional client-side node book is separate from daemon configuration:
 [[nodes]]
 id = "fez"
 url = "wss://fez.marlovious.net:9876"
-trust_certificate = "certs/fez.crt"
 ```
 
-It supplies only remote connection addresses and optional certificate trust.
-It does not declare targets, alter daemon configuration, or participate in
-deployment. `--url` connects directly and `--trust-certificate` overrides
-certificate trust for that invocation.
+It supplies only remote connection addresses. It does not declare targets,
+alter daemon configuration, or participate in deployment. `--url` connects
+directly.
 
 ### 9.2 Commands
 
@@ -493,12 +564,15 @@ targets status [target | @node | @node/target] [--json]
 targets start <target>
 targets stop <target>
 targets restart <target>
+targets add <target> [--from <target>] [--channel <name-or-path-or-url>] [--enable] [--start]
+targets remove <target>
 targets enable <target> [--start]
 targets disable <target> [--stop]
 targets rename <target> <new-target>
 
-targets set-playlist <target> <path-or-url> [--restart]
-targets clear-playlist <target> [--restart]
+targets show-channels [@node]
+targets set-channel <target> <number|name|path-or-url> [--restart]
+targets clear-channel <target> [--restart]
 
 targets play <target|all>
 targets pause <target|all>
@@ -516,17 +590,40 @@ targets shuffle <target|all>
 targets unshuffle <target|all>
 targets cycle-audio <target>
 targets cycle-subtitle <target>
+targets disable-subtitle <target>
 targets playlist <target> [item]
 targets identify [@node]
 
 targets mpv <target> <allowed-native-command> [args...]
 ```
 
+`targets add` creates a new target disabled and stopped by default. Without a
+source option it creates the base target `mpv.conf`. `--from` copies the
+source target's `mpv.conf` and `scripts/`. It does not copy channel state,
+channel files, or lifecycle state. `--enable` enables the new target without
+starting it. `--start` implies `--enable` and starts it immediately. The
+command prints the directories and files it creates or copies. `--channel`
+applies the existing channel operation to the new target; it does not add a
+new protocol operation.
+
+To establish a new hardware-specific configuration, an operator creates the
+target disabled, edits its local `mpv.conf`, then enables and starts it. The
+unauthenticated public protocol does not accept arbitrary `mpv.conf` contents
+or instruct the daemon to read an arbitrary host path.
+
 `all` expands client-side to the currently online targets on the selected node.
 It is valid for play/pause, mute/unmute, fullscreen, next/previous, loop,
 repeat, shuffle, and unshuffle. It is not valid for lifecycle, configuration,
 rename, loading, playlist inspection/selection, track selection, or raw native
 commands.
+
+`show-channels` lists the node's shared managed channels as a compact,
+one-based numbered list, clearing an interactive terminal before rendering.
+`set-channel` accepts one of those numbers or names,
+or an explicit external absolute M3U path or URL. `clear-channel` removes the
+target's persistent channel assignment. A target without a selected channel
+still starts and remains idle. These commands do not inspect or edit M3U
+contents. A successful set receipt includes the selected channel filename.
 
 `toggle-play all` is intentionally node-wide: if every online target is paused
 it plays them all; otherwise it pauses them all. `toggle-mute all` similarly
@@ -565,7 +662,6 @@ full migration and requires confirmation:
 $ targets rename toons movies
 
 rename:  toons -> movies
-restart: toons -> movies
 move:    ~/.config/mpv-targets/targets/toons
          -> ~/.config/mpv-targets/targets/movies
 
@@ -574,11 +670,10 @@ continue? [y/N]
 
 `N` or Enter makes no change. A non-interactive invocation must supply `--yes`;
 it never silently performs a rename. After confirmation, the command validates
-collisions and performs the service operation atomically, then reports the old
-and new name and successful restart. An error leaves the original target
-usable. For a persistently disabled target, the same confirmation replaces the
-`restart` line with `disabled: remains disabled`; it still lists the directory
-move and makes no mpv liveness check.
+collisions and performs the service operation atomically. A running target is
+rejected; the operator explicitly stops it before rename and starts it under
+the new name afterward. Success reports the old and new name and leaves the
+target stopped. An error leaves the original target usable.
 
 ### 9.3 Status
 
@@ -589,14 +684,15 @@ before printing. Piped output and `--json` do not emit terminal control codes.
 NODE::fez [fez.marlovious.net:9876] :: TARGETS ::4/4
 ====================================================================================================
 
-TARGET         STATE     PLAYBACK   AUDIO    LOOP     REPEAT   TITLE
-music          online    playing    muted    on       off      1HD Music Television (1080p)
-standard       online    paused     muted    off      on       Aelita Queen Of Mars.avi
+"MUSIC"          :: [Playing ] :: [Vol:Mute] :: [Loop:On ] :: [Repeat:Off] :: 1HD Music Television (1080p)
+"STANDARD"       :: [Paused  ] :: [Vol: 80] :: [Loop:Off] :: [Repeat:On ] :: Aelita Queen Of Mars.avi
 ```
 
-The count is the compact lifecycle signal. Status does not add a redundant
-disabled column. It reports loop and repeat state from mpv, but not a made-up
-shuffle mode.
+The count is the compact node lifecycle signal. Each target line uses the same
+quoted-name, separator, playback badge, and volume-or-mute style as PaneBot.
+The playback badge distinguishes disabled, intentionally stopped, offline,
+idle, paused, and playing targets. Status reports loop and repeat state from
+mpv, but not a made-up shuffle mode.
 
 ### 9.4 Boundaries
 
@@ -609,19 +705,24 @@ and outside Rust clients do.
 ### 10.1 TLS boundary
 
 The daemon serves only `wss://`. TLS is mandatory transport, not an optional
-feature switch. It encrypts the control connection and identifies the daemon to
-clients. It does not authenticate clients: v1 has no account, token,
-authorization, client-certificate, or certificate-renewal system.
+feature switch. It encrypts the control connection. It does not authenticate
+clients: v1 has no account, token, authorization, client-certificate, or
+certificate-renewal system.
 
 The daemon loads one configured certificate/key pair at startup. Failure to
 read the pair, parse it, or bind the listener is a clear startup failure. The
 answer-file deployer either generates a simple self-signed pair or installs a
 pair supplied by the operator. It performs no ongoing TLS work after that.
 
-Clients use normal system trust when possible, or explicitly trust the exact
-service certificate through their client configuration. Browser users may
-perform the browser's normal deliberate trust step for a self-signed node.
-This is a deployment/client concern, not protocol behavior.
+Native clients accept the daemon's presented certificate without certificate
+or hostname validation. This makes the generated self-signed path work on a
+private LAN without native trust configuration; for native clients, WSS
+provides encryption but does not authenticate the daemon.
+
+Browsers handle their own certificate-trust requirements. A deployment may
+install a certificate issued for proper DNS so browser clients can use normal
+browser trust. The daemon's certificate-loading behavior is the same for
+generated and supplied certificate files.
 
 ### 10.2 Linux service operation
 
@@ -638,7 +739,7 @@ The default systemd installation is one systemd **user** service:
 It runs:
 
 ```text
-mpv-targetsd --config %h/.config/mpv-targets/mpv-targets.toml
+%h/.local/bin/mpv-targetsd --config %h/.config/mpv-targets/mpv-targets.toml
 ```
 
 The unit runs the daemon and its mpv children as the configured target user.
@@ -672,8 +773,10 @@ no v2 source file is a required implementation dependency.
   answer files fail before deployment changes the host.
 - An answer file plus a selected deployment profile materializes the same
   daemon configuration contract on every supported Linux target host.
-- Reapplying deployment does not delete playlists, scripts, logs, certificates,
-  or unrelated files.
+- Deployment refuses an existing configuration root unless `--overwrite` is
+  explicit; an explicit overwrite requires interactive confirmation, replaces
+  that entire configuration root, and does not touch state/log files outside
+  it or unrelated host files.
 - Hardware profiles affect installation assets and `mpv.conf` material only;
   they do not change the daemon protocol or target semantics.
 
@@ -688,17 +791,19 @@ no v2 source file is a required implementation dependency.
 - Daemon restart reattaches a live target and never duplicates its mpv process.
 - A launch failure cleans up its child before recovery; it cannot leave orphan
   mpv processes behind.
-- `start`, `stop`, `restart`, `enable`, `disable`, and startup-playlist changes
+- `start`, `stop`, `restart`, `enable`, `disable`, and channel changes
   produce the exact lifecycle results defined in section 7.
-- Rename validates before mutation, requires CLI confirmation, moves the
-  declared target paths, restarts an enabled target under the new identity,
-  preserves disabled-off state, and leaves the old target intact on failure.
+- Rename validates before mutation, requires CLI confirmation and an already
+  stopped target, moves the declared target paths, preserves stopped and
+  disabled state, and leaves the old target intact on failure.
 
 #### Media and state
 
 - A local path, remote-accessible path, URL, and M3U reach mpv unchanged except
   for documented local configuration-path resolution.
-- Startup playlist URLs are passed to mpv unchanged.
+- Channel URLs are passed to mpv unchanged.
+- The shared channel catalog lists only direct `.m3u` and `.m3u8` files and is
+  available to every target on the node.
 - Snapshots and incremental events report online, stopped, disabled, playback,
   mute, title, playlist, audio/subtitle, loop, and repeat state correctly.
 - Playlist listing/jump uses one-based operator numbering and starts the chosen
@@ -707,11 +812,13 @@ no v2 source file is a required implementation dependency.
 #### Protocol and clients
 
 - The first client message is a valid complete snapshot.
+- Connected clients remain synchronized across target state, configuration,
+  add, remove, and rename changes.
 - Concurrent requests receive their own correlated terminal response.
 - Typed protocol errors, request timeout behavior, disconnect reporting, and
   target revision gaps are handled exactly as specified.
-- A client using the configured self-signed trust certificate connects by TLS;
-  a client without appropriate trust fails clearly.
+- Native clients connect by WSS to generated or supplied daemon certificates
+  without certificate or hostname trust configuration.
 - The shared Rust library and `targets` perform the same operation through the
   same public protocol.
 - `all` is expanded by `targets`, never implemented as a hidden daemon bulk

@@ -1,0 +1,53 @@
+# mpv-targets deployment answer file.
+# Run: deploy-targets setup.toml
+#
+# Use this node's LAN address when other machines will connect. Loopback
+# (127.0.0.1) accepts only clients running on this machine.
+# Example remote command after deployment:
+#   targets --url wss://192.168.1.50:9876 status
+
+# Optional. "generic" creates the standard portable target layout.
+host_profile = "generic"
+
+[node]
+id = "living-room"
+listen = "192.168.1.50:9876" # replace with this node's LAN address
+
+[tls]
+# Generate a simple certificate that works with native mpv-targets clients.
+generate_self_signed = true
+# To supply an existing pair instead, set generate_self_signed = false and add:
+# certificate = "server.crt"
+# private_key = "server.key"
+
+[service]
+# true installs, enables, and starts the systemd user service.
+# false writes the files and prints the manual systemctl command.
+install = true
+
+# Targets are created with their own mpv.conf and scripts/.
+# Deployment also creates one shared channels/ directory. Add user-managed
+# .m3u or .m3u8 files there, then use `targets show-channels` and
+# `targets set-channel TARGET NAME`. An absolute M3U path or URL is also
+# accepted when selecting a channel.
+
+[[targets]]
+name = "cameras"
+disabled = false
+start_paused = true
+start_muted = true
+volume = 100
+
+[[targets]]
+name = "movies"
+disabled = false
+start_paused = true
+start_muted = true
+volume = 100
+
+[[targets]]
+name = "music"
+disabled = false
+start_paused = true
+start_muted = true
+volume = 100
