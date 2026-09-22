@@ -266,7 +266,8 @@ The implemented operator commands are:
 status [target] [--json]
 add <target> [--from TARGET] [--channel VALUE] [--enable] [--start]
 remove <target> [--yes]
-start|stop|restart <target>
+start|stop <target>
+restart <target|all>
 enable <target> [--start]
 disable <target> [--stop]
 rename <target> <new-target> [--yes]

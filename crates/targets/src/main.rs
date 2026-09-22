@@ -191,7 +191,10 @@ fn validate_command_args(command: &str, args: &[String]) -> Result<(), String> {
             &["<target>", "<new-target>"],
             &["<target>", "<new-target>", "--yes"],
         ]),
-        "start" | "stop" | "restart" => exact(&[&["<target>"]]),
+        "start" | "stop" => {
+            exact(&[&["<target>"]]) && args.first().is_some_and(|target| target != "all")
+        }
+        "restart" => exact(&[&["<target>"]]),
         "enable" => exact(&[&["<target>"], &["<target>", "--start"]]),
         "disable" => exact(&[&["<target>"], &["<target>", "--stop"]]),
         "show-channels" => exact(&[&[]]),
@@ -300,6 +303,24 @@ async fn status(client: &RemoteClient, url: &str, args: &[String]) -> Result<(),
 
 async fn lifecycle(client: &RemoteClient, command: &str, args: &[String]) -> Result<(), String> {
     let target = args.first().ok_or("target is required")?;
+    if command == "restart" && target == "all" {
+        let snapshot = client
+            .snapshot()
+            .await
+            .ok_or("daemon did not send a snapshot")?;
+        for target in restartable_targets(&snapshot) {
+            print_target_response(
+                client
+                    .target(&target)
+                    .restart()
+                    .await
+                    .map_err(|e| e.to_string())?,
+                &target,
+                command,
+            )?;
+        }
+        return Ok(());
+    }
     let target_client = client.target(target);
     let response = match command {
         "start" => target_client.start().await,
@@ -323,6 +344,15 @@ async fn lifecycle(client: &RemoteClient, command: &str, args: &[String]) -> Res
         response
     };
     print_target_response(response, target, command)
+}
+
+fn restartable_targets(snapshot: &mpv_targets::Snapshot) -> Vec<String> {
+    snapshot
+        .targets
+        .iter()
+        .filter(|target| target.online && !target.disabled && !target.stopped)
+        .map(|target| target.name.clone())
+        .collect()
 }
 
 async fn remove_target(client: &RemoteClient, args: &[String]) -> Result<(), String> {
@@ -920,7 +950,7 @@ fn take_option(args: &mut Vec<String>, option: &str) -> Result<Option<String>, S
 }
 fn print_help() {
     println!(
-        "targets [--url WSS_URL] <command>\n\nstatus [target] [--json]\nadd <target> [--from TARGET] [--channel NAME_OR_PATH_OR_URL] [--enable] [--start]\nremove <target> [--yes]\nstart|stop|restart <target>\nenable <target> [--start]\ndisable <target> [--stop]\nrename <target> <new-target> [--yes]\nshow-channels [@node]  list files in the node channel directory\nset-channel <target> <number|name|path-or-url> [--restart]  select the target channel\nclear-channel <target> [--restart]  clear the target channel\nplaylist <target> [item]  show or jump the current mpv playlist\nplay|pause|toggle-play <target|all>\nloadfile <target> <path-or-url>\nnext|previous <target|all>\nmute|unmute|toggle-mute <target|all>\nfullscreen|loop|repeat|shuffle|unshuffle <target|all>\ncycle-audio|cycle-subtitle|toggle-subtitle <target>\nidentify [@node]\nmpv <target> <allowed-native-command> [args...]"
+        "targets [--url WSS_URL] <command>\n\nstatus [target] [--json]\nadd <target> [--from TARGET] [--channel NAME_OR_PATH_OR_URL] [--enable] [--start]\nremove <target> [--yes]\nstart|stop <target>\nrestart <target|all>\nenable <target> [--start]\ndisable <target> [--stop]\nrename <target> <new-target> [--yes]\nshow-channels [@node]  list files in the node channel directory\nset-channel <target> <number|name|path-or-url> [--restart]  select the target channel\nclear-channel <target> [--restart]  clear the target channel\nplaylist <target> [item]  show or jump the current mpv playlist\nplay|pause|toggle-play <target|all>\nloadfile <target> <path-or-url>\nnext|previous <target|all>\nmute|unmute|toggle-mute <target|all>\nfullscreen|loop|repeat|shuffle|unshuffle <target|all>\ncycle-audio|cycle-subtitle|toggle-subtitle <target>\nidentify [@node]\nmpv <target> <allowed-native-command> [args...]"
     );
 }
 
@@ -960,6 +990,8 @@ mod tests {
     #[test]
     fn command_grammar_rejects_ignored_arguments() {
         assert!(validate_command_args("start", &args(&["music"])).is_ok());
+        assert!(validate_command_args("restart", &args(&["all"])).is_ok());
+        assert!(validate_command_args("start", &args(&["all"])).is_err());
         assert!(validate_command_args("start", &args(&["music", "--start"])).is_err());
         assert!(validate_command_args("disable", &args(&["music", "--stop"])).is_ok());
         assert!(validate_command_args("disable", &args(&["music", "--start"])).is_err());
@@ -972,6 +1004,37 @@ mod tests {
         );
         assert!(validate_command_args("toggle-subtitle", &args(&["music"])).is_ok());
         assert!(validate_command_args("disable-subtitle", &args(&["music"])).is_err());
+    }
+
+    #[test]
+    fn restart_all_selects_only_online_enabled_targets() {
+        let target =
+            |name: &str, disabled: bool, stopped: bool, online: bool| mpv_targets::TargetRecord {
+                name: name.into(),
+                disabled,
+                stopped,
+                online,
+                channel: None,
+                state: mpv_targets::TargetState::default(),
+                revision: 0,
+            };
+        let snapshot = mpv_targets::Snapshot {
+            protocol_version: 1,
+            node_id: "test".into(),
+            health: mpv_targets::Health {
+                state: mpv_targets::HealthState::Ready,
+                targets_configured: 4,
+                targets_expected_online: 1,
+                targets_online: 1,
+            },
+            targets: vec![
+                target("online", false, false, true),
+                target("disabled", true, true, false),
+                target("stopped", false, true, false),
+                target("offline", false, false, false),
+            ],
+        };
+        assert_eq!(restartable_targets(&snapshot), vec!["online"]);
     }
 
     #[test]

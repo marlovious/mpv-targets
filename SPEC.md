@@ -563,7 +563,7 @@ targets status [target | @node | @node/target] [--json]
 
 targets start <target>
 targets stop <target>
-targets restart <target>
+targets restart <target|all>
 targets add <target> [--from <target>] [--channel <name-or-path-or-url>] [--enable] [--start]
 targets remove <target>
 targets enable <target> [--start]
@@ -612,10 +612,12 @@ unauthenticated public protocol does not accept arbitrary `mpv.conf` contents
 or instruct the daemon to read an arbitrary host path.
 
 `all` expands client-side to the currently online targets on the selected node.
-It is valid for play/pause, mute/unmute, fullscreen, next/previous, loop,
-repeat, shuffle, and unshuffle. It is not valid for lifecycle, configuration,
-rename, loading, playlist inspection/selection, track selection, or raw native
-commands.
+For `restart all`, the client restarts only targets that are online and enabled;
+disabled and intentionally stopped targets remain untouched. `all` is also
+valid for play/pause, mute/unmute, fullscreen, next/previous, loop, repeat,
+shuffle, and unshuffle. It is not valid for other lifecycle operations,
+configuration, rename, loading, playlist inspection/selection, track
+selection, or raw native commands.
 
 `show-channels` lists the node's shared managed channels as a compact,
 one-based numbered list, clearing an interactive terminal before rendering.
