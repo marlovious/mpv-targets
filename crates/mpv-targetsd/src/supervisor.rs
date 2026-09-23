@@ -43,19 +43,39 @@ fn loop_state(value: &Value) -> Option<String> {
     let enabled = match value {
         Value::Bool(enabled) => *enabled,
         Value::Number(number) => number.as_i64()? != 0,
-        Value::String(value) => !matches!(value.as_str(), "no" | "false" | "0"),
+        Value::String(value) => !matches!(value.as_str(), "no" | "off" | "false" | "0"),
         _ => return None,
     };
     Some(if enabled { "on" } else { "off" }.into())
 }
 
 fn normalize_observed_value(field: &str, value: Value) -> Value {
+    if matches!(field, "loop_file" | "loop_playlist")
+        && let Some(state) = loop_state(&value)
+    {
+        return json!(state);
+    }
     if field == "position"
         && let Some(position) = value.as_f64()
     {
         return json!(position.floor());
     }
     value
+}
+
+fn mpv_command_values(command: &str, args: &[Value]) -> Vec<Value> {
+    let mut values = Vec::with_capacity(args.len() + 2);
+    if command == "show-text"
+        && args
+            .first()
+            .and_then(Value::as_str)
+            .is_some_and(|text| text.starts_with("${osd-ass-cc/0}"))
+    {
+        values.push(Value::String("expand-properties".into()));
+    }
+    values.push(Value::String(command.to_owned()));
+    values.extend_from_slice(args);
+    values
 }
 
 fn copy_directory(source: &Path, destination: &Path) -> io::Result<()> {
@@ -312,6 +332,9 @@ impl Supervisor {
     }
 
     pub async fn disable(&self, name: &str) -> Result<TargetRecord, SupervisorError> {
+        if !self.target_stopped(name).await? {
+            self.stop(name).await?;
+        }
         self.persist_target_change(name, |target| {
             if target.disabled {
                 None
@@ -347,19 +370,27 @@ impl Supervisor {
         from: Option<&str>,
         enable: bool,
     ) -> Result<TargetRecord, SupervisorError> {
-        let (target_dir, source_dir) = {
+        let (target_dir, source_dir, source_channel) = {
             let inner = self.inner.lock().await;
             if inner.targets.contains_key(name) {
                 return Err(SupervisorError::TargetExists(name.into()));
             }
-            let source_dir = match from {
-                Some(source) if inner.targets.contains_key(source) => {
-                    Some(self.config_root.join("targets").join(source))
-                }
+            let (source_dir, source_channel) = match from {
+                Some(source) if inner.targets.contains_key(source) => (
+                    Some(self.config_root.join("targets").join(source)),
+                    inner
+                        .targets
+                        .get(source)
+                        .and_then(|target| target.config.channel.clone()),
+                ),
                 Some(source) => return Err(SupervisorError::UnknownTarget(source.into())),
-                None => None,
+                None => (None, None),
             };
-            (self.config_root.join("targets").join(name), source_dir)
+            (
+                self.config_root.join("targets").join(name),
+                source_dir,
+                source_channel,
+            )
         };
         if target_dir.exists() {
             return Err(SupervisorError::TargetExists(name.into()));
@@ -385,7 +416,7 @@ impl Supervisor {
         let target = TargetConfig {
             name: name.into(),
             disabled,
-            channel: None,
+            channel: source_channel,
         };
         let candidate = {
             let inner = self.inner.lock().await;
@@ -556,8 +587,7 @@ impl Supervisor {
         if !self.target_online(name).await? {
             return Err(SupervisorError::TargetNotRunning);
         }
-        let mut values = vec![Value::String(command.to_owned())];
-        values.extend_from_slice(args);
+        let values = mpv_command_values(command, args);
         self.ipc_command(name, json!({"command": values})).await
     }
 
@@ -1113,6 +1143,49 @@ fn _portable_unix_only(_: &Path) {}
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn configuration_mutations_copy_channel_and_leave_disabled_targets_stopped() {
+        let root = std::env::temp_dir().join(format!(
+            "mpv-targets-add-channel-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source_dir = root.join("targets/source");
+        fs::create_dir_all(source_dir.join("scripts")).unwrap();
+        fs::write(source_dir.join("mpv.conf"), "idle=yes\n").unwrap();
+        let config_path = root.join("mpv-targets.toml");
+        let config = DaemonConfig::parse(
+            r#"[node]
+id = "test"
+listen = "127.0.0.1:9876"
+[tls]
+certificate = "tls/server.crt"
+private_key = "tls/server.key"
+[[targets]]
+name = "source"
+channel = "/srv/channels/movies.m3u8"
+"#,
+        )
+        .unwrap();
+        fs::write(&config_path, toml::to_string_pretty(&config).unwrap()).unwrap();
+        let supervisor = Supervisor::new(config, config_path);
+
+        let added = supervisor.add("copy", Some("source"), false).await.unwrap();
+
+        assert_eq!(added.channel.as_deref(), Some("/srv/channels/movies.m3u8"));
+        let persisted = fs::read_to_string(root.join("mpv-targets.toml")).unwrap();
+        assert!(persisted.contains("channel = \"/srv/channels/movies.m3u8\""));
+
+        let disabled = supervisor.disable("source").await.unwrap();
+        assert!(disabled.disabled);
+        assert!(disabled.stopped);
+        assert!(!disabled.online);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn position_updates_are_whole_seconds() {
         assert_eq!(
@@ -1122,6 +1195,39 @@ mod tests {
         assert_eq!(
             normalize_observed_value("duration", json!(12.987)),
             json!(12.987)
+        );
+    }
+
+    #[test]
+    fn loop_updates_are_normalized_for_state_and_events() {
+        assert_eq!(
+            normalize_observed_value("loop_file", json!("inf")),
+            json!("on")
+        );
+        assert_eq!(
+            normalize_observed_value("loop_playlist", json!("no")),
+            json!("off")
+        );
+        assert_eq!(loop_state(&json!("off")).as_deref(), Some("off"));
+    }
+
+    #[test]
+    fn formatted_show_text_enables_property_expansion() {
+        assert_eq!(
+            mpv_command_values(
+                "show-text",
+                &[json!("${osd-ass-cc/0}{\\fs100}movies"), json!(4000)]
+            ),
+            vec![
+                json!("expand-properties"),
+                json!("show-text"),
+                json!("${osd-ass-cc/0}{\\fs100}movies"),
+                json!(4000)
+            ]
+        );
+        assert_eq!(
+            mpv_command_values("show-text", &[json!("movies"), json!(4000)]),
+            vec![json!("show-text"), json!("movies"), json!(4000)]
         );
     }
 

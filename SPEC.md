@@ -290,12 +290,12 @@ The service exposes these target operations:
 | `stop` | Stops the target intentionally for the current daemon session. It does not change `disabled`. |
 | `restart` | Stops and relaunches an enabled target. For a disabled target, it ensures the target is stopped and does not relaunch it. |
 | `enable` | Persists `disabled = false`; it does not itself launch the target. |
-| `disable` | Persists `disabled = true`; it does not itself stop a currently running target. |
+| `disable` | Persists `disabled = true` and stops the target if it is running. Success always leaves it disabled and stopped. |
 | `set-channel` | Persists the target's selected channel; optional restart applies it immediately. |
 
-The `targets` CLI may compose existing operations for ergonomic forms such as
-`targets disable music --stop` and `targets enable music --start`. Those are
-not additional protocol operations.
+The `targets` CLI may compose existing operations for the ergonomic
+`targets enable music --start` form. This is not an additional protocol
+operation.
 
 ### 7.4 Recovery
 
@@ -376,6 +376,10 @@ node_list_channels
 `target_set_channel` carries `channel` (a string or `null`) and an explicit
 `restart` boolean. Its success data reports the persisted channel,
 whether restart was requested, and whether restart completed.
+
+`target_add` may carry `from`, naming an existing target on the same node. The
+new target copies that target's `mpv.conf`, scripts, and selected channel
+reference. It does not copy lifecycle state or channel files.
 
 `node_list_channels` returns the sorted managed channels from the node's shared
 `channels/` directory. It is the only v1 operation without a target.
@@ -534,15 +538,16 @@ or a deployment program.
 
 ```text
 music          local target named music
-@fez/music     target music on node fez
+@fez music     target music on node fez
 @fez           node fez, where a command operates on the whole node
-@fez/all       all applicable targets on node fez
+@fez all       all applicable targets on node fez
 ```
 
 A bare target always resolves through the local daemon configuration. Remote
-access is explicit with `@node/target`; there is no hidden default remote node.
-`all` and `@node/all` are reserved bulk selectors for applicable playback-wide
-commands and cannot name a real target.
+access is explicit with a standalone `@node` argument immediately before any
+target arguments; there is no hidden default remote node. Slash-combined
+`@node/target` selectors are invalid. `all` is reserved for the explicitly
+documented node-wide commands and cannot name a real target.
 
 The optional client-side node book is separate from daemon configuration:
 
@@ -559,65 +564,70 @@ directly.
 ### 9.2 Commands
 
 ```text
-targets status [target | @node | @node/target] [--json]
+targets status [@node] [target] [--json]
 
-targets start <target>
-targets stop <target>
-targets restart <target|all>
-targets add <target> [--from <target>] [--channel <name-or-path-or-url>] [--enable] [--start]
-targets remove <target>
-targets enable <target> [--start]
-targets disable <target> [--stop]
-targets rename <target> <new-target>
+targets start [@node] <target...|all>
+targets stop [@node] <target...|all>
+targets restart [@node] <target...|all>
+targets add [@node] <target> [--from <target>] [--channel <name-or-path-or-url>] [--enable] [--start]
+targets remove [@node] <target>
+targets enable [@node] <target...> [--start]
+targets disable [@node] <target...>
+targets rename [@node] <target> <new-target>
 
 targets show-channels [@node]
-targets set-channel <target> <number|name|path-or-url> [--restart]
-targets clear-channel <target> [--restart]
+targets set-channel [@node] <target> <number|name|path-or-url> [--restart]
+targets clear-channel [@node] <target> [--restart]
 
-targets play <target|all>
-targets pause <target|all>
-targets toggle-play <target|all>
-targets loadfile <target> <path-or-url>
-targets next <target|all>
-targets previous <target|all>
-targets mute <target|all>
-targets unmute <target|all>
-targets toggle-mute <target|all>
-targets fullscreen <target|all>
-targets loop <target|all>
-targets repeat <target|all>
-targets shuffle <target|all>
-targets unshuffle <target|all>
-targets cycle-audio <target>
-targets cycle-subtitle <target>
-targets toggle-subtitle <target>
-targets playlist <target> [item]
+targets play [@node] <target...|all>
+targets pause [@node] <target...|all>
+targets toggle-play [@node] <target...|all>
+targets loadfile [@node] <target> <path-or-url>
+targets append [@node] <target> <path-or-url>
+targets next [@node] <target...>
+targets previous [@node] <target...>
+targets mute [@node] <target...|all>
+targets unmute [@node] <target...>
+targets toggle-mute [@node] <target...>
+targets fullscreen [@node] <target>
+targets loop [@node] <target...>
+targets repeat [@node] <target...>
+targets shuffle [@node] <target...>
+targets unshuffle [@node] <target...>
+targets cycle-audio [@node] <target>
+targets cycle-subtitle [@node] <target>
+targets toggle-subtitle [@node] <target>
+targets playlist [@node] <target> [item]
 targets identify [@node]
 
-targets mpv <target> <allowed-native-command> [args...]
+targets mpv [@node] <target> <allowed-native-command> [args...]
 ```
 
 `targets add` creates a new target disabled and stopped by default. Without a
 source option it creates the base target `mpv.conf`. `--from` copies the
-source target's `mpv.conf` and `scripts/`. It does not copy channel state,
-channel files, or lifecycle state. `--enable` enables the new target without
-starting it. `--start` implies `--enable` and starts it immediately. The
-command prints the directories and files it creates or copies. `--channel`
-applies the existing channel operation to the new target; it does not add a
-new protocol operation.
+source target's `mpv.conf`, `scripts/`, and selected channel reference. It does
+not copy channel files or lifecycle state. An explicit `--channel` replaces
+the copied reference. `--enable` enables the new target without starting it.
+`--start` implies `--enable` and starts it immediately. The command prints the
+directories and files it creates or copies. `--channel` applies the existing
+channel operation to the new target; it does not add a new protocol operation.
 
 To establish a new hardware-specific configuration, an operator creates the
 target disabled, edits its local `mpv.conf`, then enables and starts it. The
 unauthenticated public protocol does not accept arbitrary `mpv.conf` contents
 or instruct the daemon to read an arbitrary host path.
 
-`all` expands client-side to the currently online targets on the selected node.
-For `restart all`, the client restarts only targets that are online and enabled;
-disabled and intentionally stopped targets remain untouched. `all` is also
-valid for play/pause, mute/unmute, fullscreen, next/previous, loop, repeat,
-shuffle, and unshuffle. It is not valid for other lifecycle operations,
-configuration, rename, loading, playlist inspection/selection, track
-selection, or raw native commands.
+Multiple explicit targets are processed client-side in the written order for
+the lifecycle, playback, audio, loop/repeat, and shuffle commands whose forms
+above use `<target...>`. Processing stops and reports the first failed command;
+there is no rollback.
+
+`all` expands client-side only for `start`, `stop`, `restart`, `play`, `pause`,
+`toggle-play`, and `mute`. `start all` selects enabled, intentionally stopped
+targets. `stop all` and `restart all` select online enabled targets; disabled
+targets remain untouched. Playback-wide `all` selects online enabled targets.
+`all` cannot be combined with explicit target names and is invalid for every
+other command.
 
 `show-channels` lists the node's shared managed channels as a compact,
 one-based numbered list, clearing an interactive terminal before rendering.
@@ -627,9 +637,8 @@ target's persistent channel assignment. A target without a selected channel
 still starts and remains idle. These commands do not inspect or edit M3U
 contents. A successful set receipt includes the selected channel filename.
 
-`toggle-play all` is intentionally node-wide: if every online target is paused
-it plays them all; otherwise it pauses them all. `toggle-mute all` similarly
-unmutes every target only when they are all muted; otherwise it mutes them all.
+`toggle-play all` is intentionally node-wide: if every selected target is
+paused it plays them all; otherwise it pauses them all.
 
 `loop` toggles mpv's current-item loop. `repeat` toggles mpv's playlist loop.
 Both are observable mpv state. `shuffle` and `unshuffle` remain actions: mpv
@@ -643,6 +652,8 @@ command receipt.
 `loadfile` passes a literal source to the target's mpv. It never transfers a
 local file between hosts. A remote target therefore needs a URL or a path that
 exists on that target, such as its normalized rclone/FUSE mount path.
+`append` passes the same literal source using mpv's append mode without
+interrupting the current item. Both commands operate on one target.
 
 `playlist <target>` prints the target's current playlist as a compact,
 one-based numbered list, marking the current item. `playlist <target> <item>`
@@ -650,11 +661,12 @@ selects that item and begins playback. It is intentionally a view/jump tool,
 not an interactive picker or playlist editor.
 
 `identify` is a node-wide operator action. It sends mpv `show-text` to every
-online target on the selected node with that target's canonical name and a
-4,000 ms duration. For example, `targets identify @living-room` briefly shows
-each living-room pane's name inside its own video window. It has no persistent
-effect and introduces no service operation beyond the allowed native mpv
-command.
+online target on the selected node with that target's name in uppercase and a
+4,000 ms duration. The same `show-text` message uses ASS font size 50; the
+daemon enables mpv property expansion only for that explicitly formatted text.
+For example, `targets identify @living-room` briefly shows each living-room
+pane's name inside its own video window. It has no persistent effect and
+introduces no service operation beyond the allowed native mpv command.
 
 `rename` is deliberately destructive because target names carry filesystem,
 runtime, and client identity. Before making any change, `targets` prints the

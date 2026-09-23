@@ -154,7 +154,7 @@ async fn dispatch_operation(
                 vec!["mpv.conf"]
             };
             Ok(
-                json!({"name": target.name, "disabled": target.disabled, "online": target.online, "stopped": target.stopped, "copied": copied}),
+                json!({"name": target.name, "disabled": target.disabled, "online": target.online, "stopped": target.stopped, "channel": target.channel, "copied": copied}),
             )
         }
         Operation::TargetStart => {

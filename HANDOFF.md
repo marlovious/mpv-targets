@@ -200,91 +200,42 @@ contain paths relative to that cloud root so the same channel works on every
 host. Do not mix host-local absolute paths into globally shared M3Us. Each
 node only needs the cloud mount available at its configured catalog location.
 
-## Current unresolved product direction: regular and channeled mpv
+## Regular mpv and persistent channels
 
-This discussion is conceptual only. No type/mode field or behavior has been
-approved or implemented yet.
-
-The channel metaphor exposed a real split between two usage lines:
-
-1. **Regular mpv / playback use**
-   - starts as ordinary idle mpv;
-   - a client owns the live session;
-   - clients load files and manipulate the live playlist;
-   - persistent channel assignment is irrelevant or unwanted.
-
-2. **Channeled mpv / signage use**
-   - has a persistent M3U channel;
-   - starting loads that channel;
-   - changing the channel should likely apply immediately;
-   - it behaves like a persistent signage appliance.
-
-The promising idea is one small source-management condition, not two daemon
-implementations and not a deep type system. Supervision, lifecycle, protocol,
-and state remain shared. The condition would only clarify source/startup
-behavior.
-
-Why this matters: normal channel switching currently exposes too much of the
-lifecycle assembly. For a disabled target, an operator must currently do:
-
-```text
-targets set-channel @node/target 3
-targets enable @node/target --start
-```
-
-`set-channel --start` is not implemented. `set-channel` persists only;
-`--restart` applies it to an already-running target. This is technically clear
-but feels awkward for signage. A usage posture may collapse that complexity
-into a defined assumption rather than adding more flags.
-
-The concise concept agreed in conversation was:
-
-- channel-managed: persistent channel; start loads it; changing it applies
-  immediately;
-- session-managed: starts idle; clients own the live playlist; no persistent
-  channel is expected.
-
-Questions still to decide before touching the spec or code:
-
-- Is this distinction actually encoded, or only a client/deployment default?
-- What is the smallest honest name for it?
-- Does a channel change ensure a target is running, or merely switch an
-  already-running target?
-- Does signage posture imply enabled/autostart, or must administrative
-  `disabled` always remain an absolute override?
-- Which exact moments differ: creation, daemon startup, explicit start,
-  channel change, restart, and status?
-
-Do not implement a target type until these behavioral differences are written
-plainly and shown to justify the extra configuration branch.
+There is no target type or mode. A target with a selected channel loads that
+M3U when it starts; a target without one starts as ordinary idle mpv. Clients
+may still load and manipulate the live playlist in either case. Channel changes
+remain explicit persistence operations, and `--restart` is the explicit way to
+apply one immediately to a running target.
 
 ## Current `targets` command surface
 
 The implemented operator commands are:
 
 ```text
-status [target] [--json]
-add <target> [--from TARGET] [--channel VALUE] [--enable] [--start]
-remove <target> [--yes]
-start|stop <target>
-restart <target|all>
-enable <target> [--start]
-disable <target> [--stop]
-rename <target> <new-target> [--yes]
+status [@node] [target] [--json]
+add [@node] <target> [--from TARGET] [--channel VALUE] [--enable] [--start]
+remove [@node] <target> [--yes]
+start|stop|restart [@node] <target...|all>
+enable [@node] <target...> [--start]
+disable [@node] <target...>
+rename [@node] <target> <new-target> [--yes]
 
 show-channels [@node]
-set-channel <target> <number|name|path-or-url> [--restart]
-clear-channel <target> [--restart]
-playlist <target> [item]
+set-channel [@node] <target> <number|name|path-or-url> [--restart]
+clear-channel [@node] <target> [--restart]
+playlist [@node] <target> [item]
 
-play|pause|toggle-play <target|all>
-loadfile <target> <path-or-url>
-next|previous <target|all>
-mute|unmute|toggle-mute <target|all>
-fullscreen|loop|repeat|shuffle|unshuffle <target|all>
-cycle-audio|cycle-subtitle|toggle-subtitle <target>
+play|pause|toggle-play [@node] <target...|all>
+loadfile [@node] <target> <path-or-url>
+append [@node] <target> <path-or-url>
+next|previous [@node] <target...>
+mute [@node] <target...|all>
+unmute|toggle-mute [@node] <target...>
+loop|repeat|shuffle|unshuffle [@node] <target...>
+fullscreen|cycle-audio|cycle-subtitle|toggle-subtitle [@node] <target>
 identify [@node]
-mpv <target> <allowed-native-command> [args...]
+mpv [@node] <target> <allowed-native-command> [args...]
 ```
 
 `toggle-subtitle` replaced `disable-subtitle` because lifecycle already uses
@@ -297,14 +248,15 @@ Remote selectors are explicit:
 
 ```text
 @dr-fez             whole node where supported
-@dr-fez/cameras     one remote target
-@dr-fez/all         remote bulk selector
+@dr-fez cameras     one remote target
+@dr-fez all         remote bulk selector
 ```
 
-`targets play all @dr-fez` is invalid. The correct form is:
+The node selector immediately precedes target names:
 
 ```text
-targets play @dr-fez/all
+targets play @dr-fez cameras movies
+targets pause @dr-fez all
 ```
 
 The optional client address book is:
@@ -324,21 +276,13 @@ url = "wss://10.11.12.21:9876"
 A bare target or `all` always means the local node; there is no hidden default
 remote node. `--url` is also supported for direct access.
 
-## Bulk-operation discussion
+## Multiple-target operations
 
-The current CLI permits `all` for playback-wide commands documented in
-`SPEC.md`, including next/previous, loop/repeat, and shuffle/unshuffle.
-
-During remote testing, the user questioned whether bulk next, previous, loop,
-repeat, shuffle, or unshuffle have a real operator use. The likely useful bulk
-surface is only:
-
-- play, pause, toggle-play;
-- mute, unmute, toggle-mute;
-- fullscreen.
-
-This narrowing was discussed but not approved as a specification amendment or
-implemented. Do not silently remove commands. Revisit it explicitly.
+Applicable commands accept explicit target lists and process them in order,
+stopping at the first error without rollback. `all` is intentionally narrower:
+start, stop, restart, play, pause, toggle-play, and mute only. Fullscreen,
+track operations, loading, channel mutation, playlist inspection, and raw mpv
+commands remain single-target.
 
 ## Known findings from remote testing
 
@@ -362,7 +306,7 @@ Verified remotely:
 - direct `--url` and address-book node resolution;
 - supported bulk operations.
 
-### Confirmed defect: loop/repeat incremental event type
+### Fixed defect: loop/repeat incremental event type
 
 On a second bulk loop or repeat toggle, the client can disconnect with:
 
@@ -371,27 +315,18 @@ invalid server message: invalid value for target change field `loop_file`
 invalid server message: invalid value for target change field `loop_playlist`
 ```
 
-The root cause was inspected but not fixed. In
-`crates/mpv-targetsd/src/supervisor.rs`, `update_observed` converts raw mpv loop values
-to canonical `"on"`/`"off"` strings for stored state but emits the original raw
-value in `TargetChanged`. The public client correctly expects the protocol's
-string form. Fix the daemon to broadcast the same canonical value it stores,
-and add regression tests for both fields and both directions. This matters to
-single-target clients too, even if bulk loop/repeat is removed.
+The daemon now normalizes loop values before both storing and broadcasting
+them, so `TargetChanged` carries the same canonical `"on"`/`"off"` strings as
+snapshots. Regression coverage includes both loop fields and directions.
 
-### Bulk failure behavior needs a ruling
-
-`next @dr-fez/all` successfully advanced `cameras`, then stopped when another
-target's mpv correctly rejected an impossible next operation. The remaining
-targets were not attempted. Decide whether bulk operator commands are
-intentionally fail-fast or should continue and report per-target failures.
-Do not add aggregation machinery if the questionable bulk commands are removed
-instead.
+Multiple-target commands intentionally fail fast. Each completed target has
+already printed its correlated receipt; the first failure is reported and
+later targets are not attempted. There is no rollback or aggregation layer.
 
 ### JSON target filtering inconsistency
 
-Human `status @dr-fez/cameras` prints only cameras. The JSON form
-`status @dr-fez/cameras --json` currently prints the complete node snapshot.
+Human `status @dr-fez cameras` prints only cameras. The JSON form
+`status @dr-fez cameras --json` currently prints the complete node snapshot.
 This is an observed consistency issue, not yet fixed. A change must decide
 whether JSON target status should be a filtered snapshot or a target record;
 do not casually invent a second JSON shape.
@@ -458,8 +393,9 @@ Deployment is non-interactive and non-destructive by default. An existing
 configuration causes an error. Redeployment requires `--overwrite` and a real
 terminal confirmation; unattended overwrite is intentionally unsupported.
 
-`targets add --from` copies only trusted target-local `mpv.conf` and scripts.
-It does not copy lifecycle state, selected channel, or channel files. Arbitrary
+`targets add --from` copies trusted target-local `mpv.conf`, scripts, and the
+selected channel reference. It does not copy lifecycle state or channel files.
+Arbitrary
 remote `mpv.conf` content and remote filesystem path instructions were removed
 from the public protocol.
 

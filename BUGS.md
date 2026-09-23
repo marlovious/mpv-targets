@@ -6,8 +6,16 @@ the behavior is fixed and retested.
 - [fixed] Intentional `stop` left stale observed playback fields in status.
   The daemon now clears them; live stop/disable and restart regression checks
   pass.
-- [fixed] `targets disable <target> --stop` now disables and stops the target,
-  clearing its observed playback fields.
+- [fixed] `targets disable <target>` now always disables and stops the target,
+  clearing its observed playback fields. The redundant `--stop` form was
+  removed.
+- [investigate: CLI contract] `targets status <target> --json` currently emits
+  the full node snapshot even when a target was selected. Decide whether to
+  return the same snapshot envelope filtered to that target, while preserving
+  a meaningful health count.
+- [investigate: CLI contract] `targets set-channel <disabled-target> ...
+  --restart` currently persists the channel and quietly leaves the target
+  stopped. It should reject the restart request before mutating the channel.
 - [fixed] `targets enable <target> --start` now enables and starts the target.
 - [closed: not reproduced] One early `remove --yes` run printed a
   connection-refused diagnostic before its successful removal receipt. Later
@@ -54,7 +62,7 @@ the behavior is fixed and retested.
   Live loop and repeat toggles each passed on then off.
 - [fixed] `loop` and `repeat` now set explicit mpv `no`/`inf` values instead of
   incrementing mpv's numeric loop count with `cycle`.
-- [fixed] `toggle-play all` and `toggle-mute all` now make one node-wide
-  decision from the cached snapshot. Mixed playback became all paused, all
-  paused became all playing, mixed audio became all muted, and all muted became
-  all unmuted in live Bipper checks.
+- [fixed] `toggle-play all` makes one node-wide decision from the cached
+  snapshot. Mixed playback became all paused and all paused became all playing
+  in live Bipper checks. The later command-surface cleanup removed
+  `toggle-mute all`; node-wide audio exposes only the deterministic `mute all`.
