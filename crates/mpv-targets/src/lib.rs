@@ -12,7 +12,10 @@ mod tls;
 
 pub use answer::{AnswerError, AnswerFile, AnswerTarget, AnswerTls, ServiceAnswer};
 pub use client::{
-    ClientError, ClientOptions, LoadMode, LoopState, RemoteClient, TargetClient, Track,
+    AddTargetResult, ChannelCatalog, ChannelMutationResult, ClientError, ClientOptions,
+    DisconnectReason, EnableResult, LifecycleResult, LoadMode, LoopState, PlaylistItem,
+    RemoteClient, RemoveTargetResult, RenameTargetResult, TargetClient, TargetStatus, Track,
+    target_status,
 };
 
 /// The ordinary target baseline used when no source configuration is supplied.

@@ -496,9 +496,10 @@ Timeout means the requester did not observe a terminal response. It does not
 cancel a command that may already have reached the daemon; the eventual state
 must be observed through a new snapshot or event.
 
-The shared client waits at most 15 seconds for a correlated response. Its
-explicit `close` sends a WebSocket close frame and terminates the connection
-task; it does not merely mark the client disconnected locally.
+The shared client defaults to a 15-second deadline for both connection setup
+and each correlated response. Native clients may configure those deadlines.
+Its explicit `close` sends a WebSocket close frame and terminates the
+connection task; it does not merely mark the client disconnected locally.
 
 ### 8.6 Shared Rust library
 
@@ -510,15 +511,20 @@ Its connection type supports:
 ```rust
 RemoteClient::connect(options)
 client.snapshot()
+client.subscribe_snapshots()
 client.subscribe()
 client.disconnected()
+client.subscribe_disconnect()
+client.wait_disconnected()
 client.close()
 client.list_channels()
 ```
 
 It owns one reader/writer connection task, request correlation, the current
-snapshot, event delivery, and explicit disconnect reporting. It does not choose
-reconnection policy; a long-running client owns that decision.
+snapshot, latest-snapshot delivery, raw event delivery, and explicit disconnect
+reporting. Intentional close is distinguishable from transport or protocol
+failure. It does not choose reconnection policy; a long-running client owns
+that decision.
 
 The library provides typed convenience builders and methods for the healthy
 common mpv client surface:
@@ -532,6 +538,12 @@ common mpv client surface:
 - transient OSD text;
 - native allowed-command escape hatch;
 - every service operation in section 8.2.
+
+Stable service results, channel catalogs, and playlist items have public typed
+representations. The raw request/result escape hatch remains available. The
+library also provides the canonical derived display status precedence
+`disabled -> stopped -> offline -> idle -> paused -> playing`; this is a view
+of snapshot fields, not an additional daemon lifecycle state.
 
 These conveniences compile to the same native mpv or service operations
 documented above. They remove repeated command strings from clients; they do

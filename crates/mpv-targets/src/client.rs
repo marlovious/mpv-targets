@@ -19,8 +19,8 @@ use std::sync::{
 use thiserror::Error;
 use tokio::{
     net::TcpStream,
-    sync::{RwLock, broadcast, mpsc, oneshot},
-    time::{Duration, sleep, timeout},
+    sync::{RwLock, broadcast, mpsc, oneshot, watch},
+    time::{Duration, timeout},
 };
 use tokio_rustls::TlsConnector;
 use tokio_tungstenite::{
@@ -34,7 +34,8 @@ type PendingMap = Arc<
     >,
 >;
 
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 enum ClientCommand {
     Request(Request),
@@ -45,14 +46,135 @@ enum ClientCommand {
 struct ConnectionState {
     pending: PendingMap,
     events: broadcast::Sender<Event>,
-    snapshot: Arc<RwLock<Option<Snapshot>>>,
+    snapshot: watch::Sender<Option<Snapshot>>,
     disconnected: Arc<AtomicBool>,
     disconnect_error: Arc<RwLock<Option<ClientError>>>,
+    disconnect: watch::Sender<Option<DisconnectReason>>,
 }
 
 #[derive(Clone, Debug)]
 pub struct ClientOptions {
     pub url: String,
+    pub connect_timeout: Duration,
+    pub request_timeout: Duration,
+}
+
+impl ClientOptions {
+    pub fn new(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
+        }
+    }
+
+    pub fn with_connect_timeout(mut self, value: Duration) -> Self {
+        self.connect_timeout = value;
+        self
+    }
+
+    pub fn with_request_timeout(mut self, value: Duration) -> Self {
+        self.request_timeout = value;
+        self
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum DisconnectReason {
+    Closed,
+    Failed(ClientError),
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq)]
+pub struct LifecycleResult {
+    pub online: bool,
+    pub stopped: bool,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq)]
+pub struct EnableResult {
+    pub disabled: bool,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq)]
+pub struct AddTargetResult {
+    pub name: String,
+    pub disabled: bool,
+    pub online: bool,
+    pub stopped: bool,
+    pub channel: Option<String>,
+    pub copied: Vec<String>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq)]
+pub struct RemoveTargetResult {
+    pub removed: String,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq)]
+pub struct RenameTargetResult {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq)]
+pub struct ChannelMutationResult {
+    pub channel: Option<String>,
+    pub restart_requested: bool,
+    pub restart_completed: bool,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq)]
+pub struct ChannelCatalog {
+    pub channels: Vec<String>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq)]
+pub struct PlaylistItem {
+    pub filename: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub current: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TargetStatus {
+    Disabled,
+    Stopped,
+    Offline,
+    Idle,
+    Paused,
+    Playing,
+}
+
+impl TargetStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Disabled => "Disabled",
+            Self::Stopped => "Stopped",
+            Self::Offline => "Offline",
+            Self::Idle => "Idle",
+            Self::Paused => "Paused",
+            Self::Playing => "Playing",
+        }
+    }
+}
+
+pub fn target_status(target: &crate::TargetRecord) -> TargetStatus {
+    if target.disabled {
+        TargetStatus::Disabled
+    } else if target.stopped {
+        TargetStatus::Stopped
+    } else if !target.online {
+        TargetStatus::Offline
+    } else if target.state.idle_active == Some(true) {
+        TargetStatus::Idle
+    } else if target.state.paused == Some(true) {
+        TargetStatus::Paused
+    } else {
+        TargetStatus::Playing
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -128,18 +250,31 @@ pub enum ClientError {
 pub struct RemoteClient {
     writer: mpsc::Sender<ClientCommand>,
     pending: PendingMap,
-    snapshot: Arc<RwLock<Option<Snapshot>>>,
+    snapshot: watch::Receiver<Option<Snapshot>>,
     events: broadcast::Sender<Event>,
     disconnected: Arc<AtomicBool>,
     disconnect_error: Arc<RwLock<Option<ClientError>>>,
+    disconnect: watch::Receiver<Option<DisconnectReason>>,
     next_id: Arc<AtomicU64>,
+    request_timeout: Duration,
 }
 
 impl RemoteClient {
     pub async fn connect(options: ClientOptions) -> Result<Self, ClientError> {
-        let endpoint = Endpoint::parse(&options.url)?;
-        let request = options
-            .url
+        let connect_timeout = options.connect_timeout;
+        timeout(connect_timeout, Self::connect_inner(options))
+            .await
+            .map_err(|_| ClientError::Timeout)?
+    }
+
+    async fn connect_inner(options: ClientOptions) -> Result<Self, ClientError> {
+        let ClientOptions {
+            url,
+            request_timeout,
+            ..
+        } = options;
+        let endpoint = Endpoint::parse(&url)?;
+        let request = url
             .clone()
             .into_client_request()
             .map_err(|e| ClientError::Url(e.to_string()))?;
@@ -169,7 +304,8 @@ impl RemoteClient {
         let (writer, mut reader) = socket.split();
         let (tx, mut commands) = mpsc::channel(32);
         let (events, _) = broadcast::channel(64);
-        let snapshot = Arc::new(RwLock::new(None));
+        let (snapshot_tx, snapshot) = watch::channel(None);
+        let (disconnect_tx, disconnect) = watch::channel(None);
         let disconnected = Arc::new(AtomicBool::new(false));
         let disconnect_error = Arc::new(RwLock::new(None));
         let pending: PendingMap =
@@ -177,9 +313,10 @@ impl RemoteClient {
         let connection_state = ConnectionState {
             pending: pending.clone(),
             events: events.clone(),
-            snapshot: snapshot.clone(),
+            snapshot: snapshot_tx,
             disconnected: disconnected.clone(),
             disconnect_error: disconnect_error.clone(),
+            disconnect: disconnect_tx,
         };
         tokio::spawn(async move {
             run_connection(writer, &mut reader, &mut commands, connection_state).await;
@@ -191,25 +328,35 @@ impl RemoteClient {
             events,
             disconnected,
             disconnect_error,
+            disconnect,
             next_id: Arc::new(AtomicU64::new(1)),
+            request_timeout,
         };
-        for _ in 0..500 {
-            if client.snapshot.read().await.is_some() {
+        let mut snapshots = client.subscribe_snapshots();
+        let mut disconnects = client.subscribe_disconnect();
+        loop {
+            if snapshots.borrow().is_some() {
                 return Ok(client);
             }
-            if client.disconnected() {
-                return Err(client
-                    .disconnect_error()
-                    .await
-                    .unwrap_or(ClientError::Disconnected));
+            if let Some(reason) = disconnects.borrow().clone() {
+                return Err(disconnect_reason_error(reason));
             }
-            sleep(Duration::from_millis(10)).await;
+            tokio::select! {
+                changed = snapshots.changed() => {
+                    changed.map_err(|_| ClientError::Disconnected)?;
+                }
+                changed = disconnects.changed() => {
+                    changed.map_err(|_| ClientError::Disconnected)?;
+                }
+            }
         }
-        Err(ClientError::Timeout)
     }
 
     pub async fn snapshot(&self) -> Option<Snapshot> {
-        self.snapshot.read().await.clone()
+        self.snapshot.borrow().clone()
+    }
+    pub fn subscribe_snapshots(&self) -> watch::Receiver<Option<Snapshot>> {
+        self.snapshot.clone()
     }
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
         self.events.subscribe()
@@ -225,6 +372,20 @@ impl RemoteClient {
     }
     pub async fn disconnect_error(&self) -> Option<ClientError> {
         self.disconnect_error.read().await.clone()
+    }
+    pub fn subscribe_disconnect(&self) -> watch::Receiver<Option<DisconnectReason>> {
+        self.disconnect.clone()
+    }
+    pub async fn wait_disconnected(&self) -> DisconnectReason {
+        let mut disconnect = self.subscribe_disconnect();
+        loop {
+            if let Some(reason) = disconnect.borrow().clone() {
+                return reason;
+            }
+            if disconnect.changed().await.is_err() {
+                return DisconnectReason::Failed(ClientError::Disconnected);
+            }
+        }
     }
     pub async fn close(&self) {
         if self.disconnected.swap(true, Ordering::AcqRel) {
@@ -249,8 +410,11 @@ impl RemoteClient {
         self.request_inner(Some(target.into()), operation).await
     }
 
-    pub async fn list_channels(&self) -> Result<Response, ClientError> {
-        self.request_inner(None, Operation::NodeListChannels).await
+    pub async fn list_channels(&self) -> Result<ChannelCatalog, ClientError> {
+        decode_success(
+            self.request_inner(None, Operation::NodeListChannels)
+                .await?,
+        )
     }
 
     async fn request_inner(
@@ -287,7 +451,7 @@ impl RemoteClient {
                 .await
                 .unwrap_or(ClientError::Disconnected));
         }
-        match timeout(REQUEST_TIMEOUT, receive).await {
+        match timeout(self.request_timeout, receive).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(self
                 .disconnect_error()
@@ -298,6 +462,22 @@ impl RemoteClient {
                 Err(ClientError::Timeout)
             }
         }
+    }
+}
+
+fn disconnect_reason_error(reason: DisconnectReason) -> ClientError {
+    match reason {
+        DisconnectReason::Closed => ClientError::Disconnected,
+        DisconnectReason::Failed(error) => error,
+    }
+}
+
+fn decode_success<T: serde::de::DeserializeOwned>(response: Response) -> Result<T, ClientError> {
+    match response {
+        Response::Success { data, .. } => {
+            serde_json::from_value(data).map_err(|error| ClientError::Protocol(error.to_string()))
+        }
+        Response::Error { error, .. } => Err(ClientError::Remote(error.code, error.message)),
     }
 }
 
@@ -316,40 +496,51 @@ impl TargetClient {
         self.client.request(self.target.clone(), operation).await
     }
 
-    pub async fn add(&self, from: Option<String>, enable: bool) -> Result<Response, ClientError> {
-        self.request(Operation::TargetAdd { from, enable }).await
+    pub async fn add(
+        &self,
+        from: Option<String>,
+        enable: bool,
+    ) -> Result<AddTargetResult, ClientError> {
+        decode_success(self.request(Operation::TargetAdd { from, enable }).await?)
     }
-    pub async fn remove_target(&self) -> Result<Response, ClientError> {
-        self.request(Operation::TargetRemove).await
+    pub async fn remove_target(&self) -> Result<RemoveTargetResult, ClientError> {
+        decode_success(self.request(Operation::TargetRemove).await?)
     }
-    pub async fn start(&self) -> Result<Response, ClientError> {
-        self.request(Operation::TargetStart).await
+    pub async fn start(&self) -> Result<LifecycleResult, ClientError> {
+        decode_success(self.request(Operation::TargetStart).await?)
     }
-    pub async fn stop_target(&self) -> Result<Response, ClientError> {
-        self.request(Operation::TargetStop).await
+    pub async fn stop_target(&self) -> Result<LifecycleResult, ClientError> {
+        decode_success(self.request(Operation::TargetStop).await?)
     }
-    pub async fn restart(&self) -> Result<Response, ClientError> {
-        self.request(Operation::TargetRestart).await
+    pub async fn restart(&self) -> Result<LifecycleResult, ClientError> {
+        decode_success(self.request(Operation::TargetRestart).await?)
     }
-    pub async fn enable(&self) -> Result<Response, ClientError> {
-        self.request(Operation::TargetEnable).await
+    pub async fn enable(&self) -> Result<EnableResult, ClientError> {
+        decode_success(self.request(Operation::TargetEnable).await?)
     }
-    pub async fn disable(&self) -> Result<Response, ClientError> {
-        self.request(Operation::TargetDisable).await
+    pub async fn disable(&self) -> Result<EnableResult, ClientError> {
+        decode_success(self.request(Operation::TargetDisable).await?)
     }
-    pub async fn rename(&self, replacement: impl Into<String>) -> Result<Response, ClientError> {
-        self.request(Operation::TargetRename {
-            name: replacement.into(),
-        })
-        .await
+    pub async fn rename(
+        &self,
+        replacement: impl Into<String>,
+    ) -> Result<RenameTargetResult, ClientError> {
+        decode_success(
+            self.request(Operation::TargetRename {
+                name: replacement.into(),
+            })
+            .await?,
+        )
     }
     pub async fn set_channel(
         &self,
         channel: Option<String>,
         restart: bool,
-    ) -> Result<Response, ClientError> {
-        self.request(Operation::TargetSetChannel { channel, restart })
-            .await
+    ) -> Result<ChannelMutationResult, ClientError> {
+        decode_success(
+            self.request(Operation::TargetSetChannel { channel, restart })
+                .await?,
+        )
     }
 
     async fn mpv(
@@ -429,9 +620,11 @@ impl TargetClient {
         )
         .await
     }
-    pub async fn playlist(&self) -> Result<Response, ClientError> {
-        self.mpv("get_property", vec![serde_json::json!("playlist")])
-            .await
+    pub async fn playlist(&self) -> Result<Vec<PlaylistItem>, ClientError> {
+        decode_success(
+            self.mpv("get_property", vec![serde_json::json!("playlist")])
+                .await?,
+        )
     }
     pub async fn playlist_clear(&self) -> Result<Response, ClientError> {
         self.mpv("playlist-clear", vec![]).await
@@ -457,6 +650,13 @@ impl TargetClient {
         self.mpv(
             "set_property",
             vec![serde_json::json!("volume"), serde_json::json!(volume)],
+        )
+        .await
+    }
+    pub async fn adjust_volume(&self, delta: f64) -> Result<Response, ClientError> {
+        self.mpv(
+            "add",
+            vec![serde_json::json!("volume"), serde_json::json!(delta)],
         )
         .await
     }
@@ -549,6 +749,10 @@ impl TargetClient {
         )
         .await
     }
+    pub async fn keypress(&self, key: impl Into<String>) -> Result<Response, ClientError> {
+        self.mpv("keypress", vec![serde_json::json!(key.into())])
+            .await
+    }
 }
 
 async fn run_connection<S>(
@@ -577,6 +781,12 @@ async fn run_connection<S>(
     let terminal_error = result.err();
     *state.disconnect_error.write().await = terminal_error.clone();
     state.disconnected.store(true, Ordering::Release);
+    state
+        .disconnect
+        .send_replace(Some(match terminal_error.clone() {
+            Some(error) => DisconnectReason::Failed(error),
+            None => DisconnectReason::Closed,
+        }));
     for (_, sender) in state.pending.lock().await.drain() {
         let _ = sender.send(Err(terminal_error
             .clone()
@@ -588,29 +798,28 @@ async fn handle_message(
     text: &str,
     pending: &PendingMap,
     events: &broadcast::Sender<Event>,
-    snapshot: &Arc<RwLock<Option<Snapshot>>>,
+    snapshot: &watch::Sender<Option<Snapshot>>,
 ) -> Result<(), ClientError> {
     if let Ok(event) = serde_json::from_str::<Event>(text) {
-        {
-            let mut cached = snapshot.write().await;
-            match &event {
-                Event::Snapshot { snapshot: value } => {
-                    if value.protocol_version != PROTOCOL_VERSION {
-                        return Err(ClientError::Protocol(format!(
-                            "unsupported protocol version {}; expected {PROTOCOL_VERSION}",
-                            value.protocol_version
-                        )));
-                    }
-                    *cached = Some(value.clone());
+        let next = match &event {
+            Event::Snapshot { snapshot: value } => {
+                if value.protocol_version != PROTOCOL_VERSION {
+                    return Err(ClientError::Protocol(format!(
+                        "unsupported protocol version {}; expected {PROTOCOL_VERSION}",
+                        value.protocol_version
+                    )));
                 }
-                Event::TargetChanged(change) => {
-                    let current = cached.as_mut().ok_or_else(|| {
-                        ClientError::Protocol("target change received before snapshot".into())
-                    })?;
-                    apply_target_change(current, change)?;
-                }
+                value.clone()
             }
-        }
+            Event::TargetChanged(change) => {
+                let mut current = snapshot.borrow().clone().ok_or_else(|| {
+                    ClientError::Protocol("target change received before snapshot".into())
+                })?;
+                apply_target_change(&mut current, change)?;
+                current
+            }
+        };
+        snapshot.send_replace(Some(next));
         let _ = events.send(event);
         return Ok(());
     }
@@ -861,6 +1070,118 @@ mod tests {
     use super::*;
     use crate::{Health, TargetRecord, TargetState};
     use serde_json::json;
+
+    fn target_with_status(
+        disabled: bool,
+        stopped: bool,
+        online: bool,
+        idle: Option<bool>,
+        paused: Option<bool>,
+    ) -> TargetRecord {
+        TargetRecord {
+            name: "test".into(),
+            disabled,
+            stopped,
+            online,
+            channel: None,
+            state: TargetState {
+                idle_active: idle,
+                paused,
+                ..TargetState::default()
+            },
+            revision: 0,
+        }
+    }
+
+    #[test]
+    fn derived_target_status_has_one_canonical_precedence() {
+        assert_eq!(
+            target_status(&target_with_status(
+                true,
+                true,
+                false,
+                Some(true),
+                Some(true)
+            )),
+            TargetStatus::Disabled
+        );
+        assert_eq!(
+            target_status(&target_with_status(
+                false,
+                true,
+                false,
+                Some(true),
+                Some(true)
+            )),
+            TargetStatus::Stopped
+        );
+        assert_eq!(
+            target_status(&target_with_status(
+                false,
+                false,
+                false,
+                Some(true),
+                Some(true)
+            )),
+            TargetStatus::Offline
+        );
+        assert_eq!(
+            target_status(&target_with_status(
+                false,
+                false,
+                true,
+                Some(true),
+                Some(true)
+            )),
+            TargetStatus::Idle
+        );
+        assert_eq!(
+            target_status(&target_with_status(
+                false,
+                false,
+                true,
+                Some(false),
+                Some(true)
+            )),
+            TargetStatus::Paused
+        );
+        assert_eq!(
+            target_status(&target_with_status(
+                false,
+                false,
+                true,
+                Some(false),
+                Some(false)
+            )),
+            TargetStatus::Playing
+        );
+    }
+
+    #[test]
+    fn stable_success_shapes_decode_to_public_types() {
+        let response = Response::Success {
+            id: "test".into(),
+            data: json!({
+                "name": "music",
+                "disabled": false,
+                "online": true,
+                "stopped": false,
+                "channel": "/srv/channels/music.m3u8",
+                "copied": ["mpv.conf"]
+            }),
+        };
+        assert_eq!(
+            decode_success::<AddTargetResult>(response).unwrap(),
+            AddTargetResult {
+                name: "music".into(),
+                disabled: false,
+                online: true,
+                stopped: false,
+                channel: Some("/srv/channels/music.m3u8".into()),
+                copied: vec!["mpv.conf".into()],
+            }
+        );
+    }
 
     #[test]
     fn target_changes_update_cached_state_and_enforce_revisions() {

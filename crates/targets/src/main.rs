@@ -1,5 +1,6 @@
 use mpv_targets::{
-    ClientOptions, DaemonConfig, LoadMode, LoopState, Operation, RemoteClient, Response,
+    ClientOptions, DaemonConfig, LoadMode, LoopState, Operation, PlaylistItem, RemoteClient,
+    Response, target_status,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -44,7 +45,7 @@ async fn run() -> Result<(), String> {
         .map(Ok)
         .unwrap_or_else(local_daemon_url)?;
     let display_url = url.clone();
-    let client = RemoteClient::connect(ClientOptions { url })
+    let client = RemoteClient::connect(ClientOptions::new(url))
         .await
         .map_err(|e| e.to_string())?;
     let result = match command.as_str() {
@@ -278,19 +279,7 @@ async fn status(client: &RemoteClient, url: &str, args: &[String]) -> Result<(),
     println!();
     for target in snapshot.targets {
         if args.first().is_none_or(|name| name == &target.name) {
-            let playback = if target.disabled {
-                "Disabled"
-            } else if target.stopped {
-                "Stopped"
-            } else if !target.online {
-                "Offline"
-            } else if target.state.idle_active == Some(true) {
-                "Idle"
-            } else if target.state.paused == Some(true) {
-                "Paused"
-            } else {
-                "Playing"
-            };
+            let playback = target_status(&target).label();
             let volume = if target.state.muted == Some(true) {
                 "Vol:Mute".to_owned()
             } else if let Some(volume) = target.state.volume {
@@ -328,22 +317,47 @@ async fn lifecycle(client: &RemoteClient, command: &str, args: &[String]) -> Res
     };
     for target in targets {
         let target_client = client.target(&target);
-        let response = match command {
-            "start" => target_client.start().await,
-            "stop" => target_client.stop_target().await,
-            "restart" => target_client.restart().await,
-            "enable" => target_client.enable().await,
-            "disable" => target_client.disable().await,
+        let result = match command {
+            "start" => target_client
+                .start()
+                .await
+                .map(|result| if result.online { "Online" } else { "Stopped" }),
+            "stop" => target_client
+                .stop_target()
+                .await
+                .map(|result| if result.stopped { "Stopped" } else { "Online" }),
+            "restart" => target_client
+                .restart()
+                .await
+                .map(|result| if result.online { "Online" } else { "Stopped" }),
+            "enable" => target_client.enable().await.map(|result| {
+                if result.disabled {
+                    "Disabled"
+                } else {
+                    "Enabled"
+                }
+            }),
+            "disable" => target_client.disable().await.map(|result| {
+                if result.disabled {
+                    "Disabled"
+                } else {
+                    "Enabled"
+                }
+            }),
             _ => unreachable!(),
         }
         .map_err(|e| e.to_string())?;
-        let follow_up = command == "enable" && args.iter().any(|arg| arg == "--start");
-        let response = if follow_up {
-            target_client.start().await.map_err(|e| e.to_string())?
+        let result = if command == "enable" && args.iter().any(|arg| arg == "--start") {
+            let started = target_client.start().await.map_err(|e| e.to_string())?;
+            if started.online { "Online" } else { "Stopped" }
         } else {
-            response
+            result
         };
-        print_target_response(response, &target, command)?;
+        println!(
+            "{} :: [{}] :: [{result}]",
+            quoted_target(&target),
+            action_label(command)
+        );
     }
     Ok(())
 }
@@ -370,15 +384,16 @@ async fn remove_target(client: &RemoteClient, args: &[String]) -> Result<(), Str
     if !confirmed {
         return Ok(());
     }
-    print_target_response(
-        client
-            .target(target)
-            .remove_target()
-            .await
-            .map_err(|e| e.to_string())?,
-        target,
-        "remove",
-    )
+    let result = client
+        .target(target)
+        .remove_target()
+        .await
+        .map_err(|e| e.to_string())?;
+    println!(
+        "{} :: [Remove] :: [Removed]",
+        quoted_target(&result.removed)
+    );
+    Ok(())
 }
 
 async fn rename_target(client: &RemoteClient, args: &[String]) -> Result<(), String> {
@@ -388,17 +403,15 @@ async fn rename_target(client: &RemoteClient, args: &[String]) -> Result<(), Str
     if !confirmed {
         return Ok(());
     }
-    response_data(
-        client
-            .target(old)
-            .rename(new.clone())
-            .await
-            .map_err(|e| e.to_string())?,
-    )?;
+    let result = client
+        .target(old)
+        .rename(new.clone())
+        .await
+        .map_err(|e| e.to_string())?;
     println!(
         "{} -> {} :: [Renamed]",
-        quoted_target(old),
-        quoted_target(new)
+        quoted_target(&result.from),
+        quoted_target(&result.to)
     );
     Ok(())
 }
@@ -488,29 +501,26 @@ async fn add_target(client: &RemoteClient, args: &[String]) -> Result<(), String
     let channel = option_value(args, "--channel")?;
     let enable = args.iter().any(|arg| arg == "--enable");
     let start = args.iter().any(|arg| arg == "--start");
-    let response = client
+    let data = client
         .target(name)
         .add(from.clone(), enable || start)
         .await
         .map_err(|e| e.to_string())?;
-    let data = response_data(response)?;
     if let Some(ref channel) = channel {
-        response_data(
-            client
-                .target(name)
-                .set_channel(Some(resolve_channel(client, channel).await?), false)
-                .await
-                .map_err(|e| e.to_string())?,
-        )?;
+        client
+            .target(name)
+            .set_channel(Some(resolve_channel(client, channel).await?), false)
+            .await
+            .map_err(|e| e.to_string())?;
     }
     let started = if start {
-        Some(response_data(
+        Some(
             client
                 .target(name)
                 .start()
                 .await
                 .map_err(|e| e.to_string())?,
-        )?)
+        )
     } else {
         None
     };
@@ -518,13 +528,7 @@ async fn add_target(client: &RemoteClient, args: &[String]) -> Result<(), String
     if let Some(source) = &from {
         print_work_receipt("Source", &format!("targets/{source}/"));
     }
-    for item in data
-        .get("copied")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-    {
+    for item in &data.copied {
         if from.is_some() {
             print_work_receipt("Copied", item);
         } else {
@@ -533,7 +537,7 @@ async fn add_target(client: &RemoteClient, args: &[String]) -> Result<(), String
     }
     if from.is_some()
         && channel.is_none()
-        && let Some(copied_channel) = data.get("channel").and_then(Value::as_str)
+        && let Some(copied_channel) = data.channel.as_deref()
     {
         print_work_receipt("Channel", channel_display_name(copied_channel));
     }
@@ -543,16 +547,8 @@ async fn add_target(client: &RemoteClient, args: &[String]) -> Result<(), String
     if start {
         print_work_receipt("Started", name);
     }
-    let enabled = !data
-        .get("disabled")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
-    let online = started
-        .as_ref()
-        .unwrap_or(&data)
-        .get("online")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let enabled = !data.disabled;
+    let online = started.as_ref().map_or(data.online, |result| result.online);
     println!();
     println!(
         "{} :: [Added] :: [{}] :: [{}]",
@@ -679,30 +675,33 @@ async fn channel(client: &RemoteClient, command: &str, args: &[String]) -> Resul
         Some(resolve_channel(client, args.get(1).ok_or("channel is required")?).await?)
     };
     let restart = args.iter().any(|arg| arg == "--restart");
-    let data = response_data(
-        client
-            .target(target)
-            .set_channel(selected.clone(), restart)
-            .await
-            .map_err(|e| e.to_string())?,
-    )?;
+    let data = client
+        .target(target)
+        .set_channel(selected.clone(), restart)
+        .await
+        .map_err(|e| e.to_string())?;
     if let Some(selected) = selected {
         print!(
             "{} :: [{}] :: [SET]",
             quoted_target(target),
             channel_display_name(&selected)
         );
-        if data
-            .get("restart_completed")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
+        if data.restart_completed {
             print!(" :: [Restarted]");
         }
         println!();
         Ok(())
     } else {
-        print_target_data(&data, target, "channel:clear")
+        println!(
+            "{} :: [Channel: Clear] :: [{}]",
+            quoted_target(target),
+            if data.restart_completed {
+                "Restarted"
+            } else {
+                "OK"
+            }
+        );
+        Ok(())
     }
 }
 
@@ -752,17 +751,11 @@ async fn resolve_channel(client: &RemoteClient, value: &str) -> Result<String, S
 }
 
 async fn channel_entries(client: &RemoteClient) -> Result<Vec<String>, String> {
-    let data = response_data(client.list_channels().await.map_err(|e| e.to_string())?)?;
-    data.get("channels")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "daemon returned an invalid channel list".into())
-        .map(|entries| {
-            entries
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect()
-        })
+    Ok(client
+        .list_channels()
+        .await
+        .map_err(|e| e.to_string())?
+        .channels)
 }
 
 async fn playlist(client: &RemoteClient, args: &[String]) -> Result<(), String> {
@@ -782,29 +775,17 @@ async fn playlist(client: &RemoteClient, args: &[String]) -> Result<(), String> 
             &format!("playlist:{index}"),
         );
     }
-    let response = client
+    let entries = client
         .target(target)
         .playlist()
         .await
         .map_err(|e| e.to_string())?;
-    let data = response_data(response)?;
-    let entries = data
-        .as_array()
-        .ok_or("daemon returned an invalid playlist")?;
     clear_interactive_terminal();
     println!("{} :: [Current Playlist]", quoted_name(target));
     let stdout = io::stdout();
     let mut stdout = io::BufWriter::new(stdout.lock());
     for (index, entry) in entries.iter().enumerate() {
-        let marker = if entry
-            .get("current")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            ">"
-        } else {
-            " "
-        };
+        let marker = if entry.current { ">" } else { " " };
         let title = playlist_item_display(entry);
         let title = truncate_text(title, 72);
         if let Err(error) = writeln!(stdout, "{marker} {:>3} {title}", index + 1) {
@@ -841,15 +822,11 @@ fn quoted_name(target: &str) -> String {
     format!("\"{}\"", target.to_uppercase())
 }
 
-fn playlist_item_display(entry: &Value) -> &str {
-    if let Some(title) = entry
-        .get("title")
-        .and_then(Value::as_str)
-        .filter(|title| !title.is_empty())
-    {
+fn playlist_item_display(entry: &PlaylistItem) -> &str {
+    if let Some(title) = entry.title.as_deref().filter(|title| !title.is_empty()) {
         return title;
     }
-    let filename = entry.get("filename").and_then(Value::as_str).unwrap_or("-");
+    let filename = &entry.filename;
     if filename.starts_with("http") {
         filename
     } else {
@@ -968,9 +945,21 @@ mod tests {
 
     #[test]
     fn playlist_display_matches_panebot_fallback() {
-        let titled = json!({"filename": "/media/raw.mkv", "title": "Display title"});
-        let local = json!({"filename": "/media/video/movie.mkv"});
-        let remote = json!({"filename": "https://example.test/live/index.m3u8"});
+        let titled = PlaylistItem {
+            filename: "/media/raw.mkv".into(),
+            title: Some("Display title".into()),
+            current: false,
+        };
+        let local = PlaylistItem {
+            filename: "/media/video/movie.mkv".into(),
+            title: None,
+            current: false,
+        };
+        let remote = PlaylistItem {
+            filename: "https://example.test/live/index.m3u8".into(),
+            title: None,
+            current: false,
+        };
         assert_eq!(playlist_item_display(&titled), "Display title");
         assert_eq!(playlist_item_display(&local), "movie.mkv");
         assert_eq!(
