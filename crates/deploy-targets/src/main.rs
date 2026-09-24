@@ -9,6 +9,41 @@ use std::{
 use thiserror::Error;
 
 const SERVICE_UNIT: &str = "mpv-targets.service";
+const HYPRLAND_WAIT_HELPER: &str = "mpv-targets-wait-hyprland";
+const HYPRLAND_WAIT_SCRIPT: &[u8] = br#"#!/bin/sh
+while ! systemctl --user show-environment 2>/dev/null | grep -q '^HYPRLAND_INSTANCE_SIGNATURE=.' \
+   || ! systemctl --user show-environment 2>/dev/null | grep -q '^WAYLAND_DISPLAY=.'; do
+    sleep 1
+done
+sleep 3
+"#;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HostProfile {
+    Generic,
+    Hyprland,
+}
+
+impl HostProfile {
+    fn parse(value: &str) -> Result<Self, DeployError> {
+        match value {
+            "generic" => Ok(Self::Generic),
+            "hyprland" => Ok(Self::Hyprland),
+            _ => Err(DeployError::UnsupportedHostProfile(value.into())),
+        }
+    }
+
+    fn service_unit(self, config_path: &Path) -> String {
+        let readiness = match self {
+            Self::Generic => String::new(),
+            Self::Hyprland => format!("ExecStartPre=%h/.local/bin/{HYPRLAND_WAIT_HELPER}\n"),
+        };
+        format!(
+            "[Unit]\nDescription=mpv-targets daemon\nAfter=default.target\n\n[Service]\n{readiness}ExecStart=%h/.local/bin/mpv-targetsd --config {}\nRestart=on-failure\nKillMode=process\n\n[Install]\nWantedBy=default.target\n",
+            config_path.display()
+        )
+    }
+}
 
 fn main() -> ExitCode {
     match run(env::args().skip(1).collect()) {
@@ -56,6 +91,7 @@ fn run(arguments: Vec<String>) -> Result<(), DeployError> {
 }
 
 struct Plan {
+    host_profile: HostProfile,
     install_service: bool,
     config: DaemonConfig,
     config_root: PathBuf,
@@ -72,11 +108,7 @@ impl Plan {
         config_root: PathBuf,
         daemon_binary: Vec<u8>,
     ) -> Result<Self, DeployError> {
-        if answer.host_profile != "generic" {
-            return Err(DeployError::UnsupportedHostProfile(
-                answer.host_profile.clone(),
-            ));
-        }
+        let host_profile = HostProfile::parse(&answer.host_profile)?;
         let answer_dir = answer_path.parent().unwrap_or(Path::new(".")).to_owned();
         let (certificate, private_key) =
             match answer.certificate_pair().map_err(DeployError::Answer)? {
@@ -120,6 +152,7 @@ impl Plan {
             .validate()
             .map_err(|error| DeployError::Config(error.to_string()))?;
         Ok(Self {
+            host_profile,
             install_service: answer.service.install,
             config,
             config_root,
@@ -131,10 +164,26 @@ impl Plan {
     }
 
     fn apply(&self) -> Result<(), DeployError> {
-        self.apply_at(&user_unit_path()?, &user_daemon_path()?)
+        let daemon_path = user_daemon_path()?;
+        let helper_path = daemon_path
+            .parent()
+            .map(|directory| directory.join(HYPRLAND_WAIT_HELPER))
+            .ok_or_else(|| DeployError::InvalidDaemonPath(daemon_path.clone()))?;
+        self.apply_at(
+            &user_unit_path()?,
+            &daemon_path,
+            &state_logs_directory()?,
+            &helper_path,
+        )
     }
 
-    fn apply_at(&self, unit_path: &Path, daemon_path: &Path) -> Result<(), DeployError> {
+    fn apply_at(
+        &self,
+        unit_path: &Path,
+        daemon_path: &Path,
+        logs_directory: &Path,
+        hyprland_helper_path: &Path,
+    ) -> Result<(), DeployError> {
         if let Some(parent) = unit_path.parent() {
             fs::create_dir_all(parent).map_err(|source| DeployError::Output {
                 path: parent.to_owned(),
@@ -151,11 +200,9 @@ impl Plan {
             path: self.config_root.join("tls"),
             source,
         })?;
-        fs::create_dir_all(self.config_root.join("logs")).map_err(|source| {
-            DeployError::Output {
-                path: self.config_root.join("logs"),
-                source,
-            }
+        fs::create_dir_all(logs_directory).map_err(|source| DeployError::Output {
+            path: logs_directory.to_owned(),
+            source,
         })?;
         fs::create_dir_all(self.config_root.join("channels")).map_err(|source| {
             DeployError::Output {
@@ -191,17 +238,16 @@ impl Plan {
             })?;
         }
         atomic_write(daemon_path, &self.daemon_binary, Some(0o755))?;
+        if self.host_profile == HostProfile::Hyprland {
+            atomic_write(hyprland_helper_path, HYPRLAND_WAIT_SCRIPT, Some(0o755))?;
+        }
         let unit_was_installed = unit_path.exists();
-        let unit = format!(
-            "[Unit]\nDescription=mpv-targets daemon\nAfter=default.target\n\n[Service]\nExecStart=%h/.local/bin/mpv-targetsd --config {}\nRestart=on-failure\nKillMode=process\n\n[Install]\nWantedBy=default.target\n",
-            self.config_root.join("mpv-targets.toml").display()
-        );
+        let unit = self
+            .host_profile
+            .service_unit(&self.config_root.join("mpv-targets.toml"));
         atomic_write(unit_path, unit.as_bytes(), None)?;
         print_work_receipt("Created", &self.config_root.display().to_string());
-        print_work_receipt(
-            "Created",
-            &self.config_root.join("logs").display().to_string(),
-        );
+        print_work_receipt("Created", &logs_directory.display().to_string());
         print_work_receipt(
             "Created",
             &self.config_root.join("tls").display().to_string(),
@@ -225,6 +271,9 @@ impl Plan {
                 .to_string(),
         );
         print_work_receipt("Installed", &daemon_path.display().to_string());
+        if self.host_profile == HostProfile::Hyprland {
+            print_work_receipt("Installed", &hyprland_helper_path.display().to_string());
+        }
         if unit_was_installed {
             print_work_receipt("Replaced", &unit_path.display().to_string());
         } else {
@@ -298,6 +347,14 @@ fn user_unit_path() -> Result<PathBuf, DeployError> {
 fn user_daemon_path() -> Result<PathBuf, DeployError> {
     let home = env::var_os("HOME").ok_or(DeployError::MissingHome)?;
     Ok(PathBuf::from(home).join(".local/bin/mpv-targetsd"))
+}
+
+fn state_logs_directory() -> Result<PathBuf, DeployError> {
+    if let Some(path) = env::var_os("XDG_STATE_HOME") {
+        return Ok(PathBuf::from(path).join("mpv-targets/logs"));
+    }
+    let home = env::var_os("HOME").ok_or(DeployError::MissingHome)?;
+    Ok(PathBuf::from(home).join(".local/state/mpv-targets/logs"))
 }
 
 fn load_daemon_binary() -> Result<Vec<u8>, DeployError> {
@@ -458,6 +515,8 @@ enum DeployError {
     CurrentExecutable(#[source] io::Error),
     #[error("mpv-targetsd must be beside deploy-targets: {0}")]
     MissingDaemonBinary(PathBuf),
+    #[error("cannot determine a directory for daemon binary: {0}")]
+    InvalidDaemonPath(PathBuf),
     #[error("cannot read {path}: {source}")]
     Input { path: PathBuf, source: io::Error },
     #[error("answer file rejected: {0}")]
@@ -519,7 +578,10 @@ volume = 80
         .unwrap();
         let unit_path = root.join("installed/systemd/user/mpv-targets.service");
         let daemon_path = root.join("installed/bin/mpv-targetsd");
-        plan.apply_at(&unit_path, &daemon_path).unwrap();
+        let logs_directory = root.join("installed/state/mpv-targets/logs");
+        let helper_path = root.join("installed/bin/mpv-targets-wait-hyprland");
+        plan.apply_at(&unit_path, &daemon_path, &logs_directory, &helper_path)
+            .unwrap();
         let daemon_config =
             DaemonConfig::parse(&fs::read_to_string(config_root.join("mpv-targets.toml")).unwrap())
                 .unwrap();
@@ -529,18 +591,20 @@ volume = 80
         assert_eq!(daemon_config.targets[0].channel, None);
         assert!(config_root.join("targets/music/scripts").is_dir());
         assert!(config_root.join("channels").is_dir());
-        assert!(config_root.join("logs").is_dir());
+        assert!(logs_directory.is_dir());
         let mpv_conf = fs::read_to_string(config_root.join("targets/music/mpv.conf")).unwrap();
         assert!(mpv_conf.contains("pause=no"));
         assert!(mpv_conf.contains("volume=80"));
         assert!(config_root.join("tls/server.crt").is_file());
         let unit = fs::read_to_string(&unit_path).unwrap();
         assert!(unit.contains("Restart=on-failure\nKillMode=process"));
+        assert!(!unit.contains("ExecStartPre="));
         assert!(unit.contains(&format!(
             "ExecStart=%h/.local/bin/mpv-targetsd --config {}",
             config_root.join("mpv-targets.toml").display()
         )));
         assert_eq!(fs::read(&daemon_path).unwrap(), b"test daemon");
+        assert!(!helper_path.exists());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -551,6 +615,52 @@ volume = 80
                 & 0o777;
             assert_eq!(mode, 0o600);
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn hyprland_profile_installs_only_session_readiness_material() {
+        let root = env::temp_dir().join(format!(
+            "mpv-targets-hyprland-deploy-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("answer")).unwrap();
+        let answer_path = root.join("answer/setup.toml");
+        fs::write(
+            &answer_path,
+            r#"host_profile = "hyprland"
+[node]
+id = "fez"
+listen = "127.0.0.1:9876"
+[tls]
+generate_self_signed = true
+[service]
+install = false
+"#,
+        )
+        .unwrap();
+        let answer = AnswerFile::parse(&fs::read_to_string(&answer_path).unwrap()).unwrap();
+        let plan = Plan::build(
+            &answer,
+            &answer_path,
+            root.join("installed/config/mpv-targets"),
+            b"test daemon".to_vec(),
+        )
+        .unwrap();
+        let unit_path = root.join("installed/systemd/user/mpv-targets.service");
+        let daemon_path = root.join("installed/bin/mpv-targetsd");
+        let helper_path = root.join("installed/bin/mpv-targets-wait-hyprland");
+        plan.apply_at(
+            &unit_path,
+            &daemon_path,
+            &root.join("installed/state/mpv-targets/logs"),
+            &helper_path,
+        )
+        .unwrap();
+        let unit = fs::read_to_string(&unit_path).unwrap();
+        assert!(unit.contains("ExecStartPre=%h/.local/bin/mpv-targets-wait-hyprland"));
+        assert_eq!(fs::read(&helper_path).unwrap(), HYPRLAND_WAIT_SCRIPT);
         fs::remove_dir_all(root).unwrap();
     }
 }

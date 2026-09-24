@@ -26,7 +26,7 @@ pub fn base_mpv_conf(start_paused: bool, start_muted: bool, volume: f64) -> Stri
 }
 pub use config::{ConfigError, DaemonConfig, TargetConfig, TlsConfig};
 pub use protocol::{
-    ErrorCode, ErrorResponse, Event, Health, HealthState, MpvOperation, Operation, Request,
-    Response, ServiceOperation, Snapshot, TargetChanged, TargetRecord, TargetState,
+    ErrorCode, ErrorResponse, Event, Health, HealthState, MediaEndReason, MpvOperation, Operation,
+    Request, Response, ServiceOperation, Snapshot, TargetChanged, TargetRecord, TargetState,
 };
 pub use tls::{TlsMaterialError, server_tls_config};

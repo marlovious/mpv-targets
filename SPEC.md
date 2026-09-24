@@ -203,8 +203,10 @@ The answer file is intentionally small and uses TOML. It declares:
 
 - node id and listener address;
 - an optional `host_profile` selecting deployment assets. It defaults to
-  `generic`; specialized values such as `nuc` or `pi` are optional and must be
-  explained in the commented answer-file template;
+  `generic`. `hyprland` installs a small user-session readiness helper so a
+  systemd user service waits for imported Hyprland and Wayland environment
+  values before it launches visible mpv targets. Specialized host profiles
+  must be explained in the commented answer-file template;
 - TLS input or self-signed certificate generation;
 - initial targets and their `disabled` state;
 - each target's initial paused, muted, and volume values, from which deployment
@@ -305,8 +307,8 @@ launch again after a later daemon restart.
 
 An unexpected mpv exit or irrecoverable configured IPC loss is a failure. For
 an enabled target that was not intentionally stopped, the supervisor reports
-the failure and retries launch with bounded backoff. A disabled or intentionally
-stopped target is never recovered.
+the failure and retries launch indefinitely with capped backoff. A disabled or
+intentionally stopped target is never recovered.
 
 Recovery is an internal implementation behavior. Clients observe it through
 target state and events; they do not manage child processes or recovery loops.
@@ -456,6 +458,13 @@ A target record contains its authoritative name; `disabled`, `stopped`, and
 revision. Observed playback fields include paused, muted, volume, title,
 playlist position/count, idle state, duration/position, loop settings, and
 audio/subtitle track information.
+
+The observed state also records mpv's most recent completed-file outcome:
+`last_end_reason` is one of `eof`, `stop`, `quit`, `error`, `redirect`, or
+`unknown`; `last_end_error` is mpv's optional error detail. Both fields are
+cleared when mpv loads the next file. They are observation only: a successful
+command remains accepted even if a later stream fails, and an `eof` result does
+not by itself prove a healthy complete stream.
 
 The daemon emits `target_changed` events containing a target name, next
 revision, and only changed fields. Clients apply them in order to their cached
@@ -802,6 +811,8 @@ no v2 source file is a required implementation dependency.
 - `stop` suppresses recovery for the current daemon session without persisting
   a second lifecycle state.
 - Unexpected mpv loss recovers an enabled, non-stopped target.
+- Recovery continues with capped backoff until the target is intentionally
+  stopped or disabled.
 - Daemon restart reattaches a live target and never duplicates its mpv process.
 - A launch failure cleans up its child before recovery; it cannot leave orphan
   mpv processes behind.
@@ -819,7 +830,8 @@ no v2 source file is a required implementation dependency.
 - The shared channel catalog lists only direct `.m3u` and `.m3u8` files and is
   available to every target on the node.
 - Snapshots and incremental events report online, stopped, disabled, playback,
-  mute, title, playlist, audio/subtitle, loop, and repeat state correctly.
+  mute, title, playlist, audio/subtitle, loop, repeat, and the most recent
+  mpv file-end outcome correctly.
 - Playlist listing/jump uses one-based operator numbering and starts the chosen
   item.
 

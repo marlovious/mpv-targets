@@ -3,7 +3,9 @@
 //! and event delivery; reconnection remains the caller's decision.
 
 use crate::protocol::PROTOCOL_VERSION;
-use crate::{Event, HealthState, Operation, Request, Response, Snapshot, TargetChanged};
+use crate::{
+    Event, HealthState, MediaEndReason, Operation, Request, Response, Snapshot, TargetChanged,
+};
 use futures_util::{SinkExt, StreamExt};
 use rustls::{
     ClientConfig, DigitallySignedStruct, SignatureScheme,
@@ -674,6 +676,12 @@ fn apply_target_change(snapshot: &mut Snapshot, change: &TargetChanged) -> Resul
             "subtitles_visible" => {
                 target.state.subtitles_visible = optional_bool(field, value)?;
             }
+            "last_end_reason" => {
+                target.state.last_end_reason = optional_end_reason(field, value)?;
+            }
+            "last_end_error" => {
+                target.state.last_end_error = optional_string(field, value)?;
+            }
             _ => {
                 return Err(ClientError::Protocol(format!(
                     "unknown target change field `{field}`"
@@ -741,6 +749,18 @@ fn optional_track(field: &str, value: &serde_json::Value) -> Result<Option<Strin
     } else {
         Err(invalid_change_field(field))
     }
+}
+
+fn optional_end_reason(
+    field: &str,
+    value: &serde_json::Value,
+) -> Result<Option<MediaEndReason>, ClientError> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    serde_json::from_value(value.clone())
+        .map(Some)
+        .map_err(|_| invalid_change_field(field))
 }
 
 fn invalid_change_field(field: &str) -> ClientError {
@@ -902,5 +922,45 @@ mod tests {
         assert_eq!(Track::Auto.as_value(), json!("auto"));
         assert_eq!(Track::Disabled.as_value(), json!("no"));
         assert_eq!(Track::Id(3).as_value(), json!(3));
+    }
+
+    #[test]
+    fn target_changes_accept_media_end_observation() {
+        let mut snapshot = Snapshot {
+            protocol_version: PROTOCOL_VERSION,
+            node_id: "test".into(),
+            health: Health {
+                state: HealthState::Ready,
+                targets_configured: 1,
+                targets_expected_online: 1,
+                targets_online: 1,
+            },
+            targets: vec![TargetRecord {
+                name: "music".into(),
+                disabled: false,
+                stopped: false,
+                online: true,
+                channel: None,
+                state: TargetState::default(),
+                revision: 0,
+            }],
+        };
+        apply_target_change(
+            &mut snapshot,
+            &TargetChanged {
+                target: "music".into(),
+                revision: 1,
+                changed: json!({"last_end_reason": "error", "last_end_error": "network"}),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            snapshot.targets[0].state.last_end_reason,
+            Some(MediaEndReason::Error)
+        );
+        assert_eq!(
+            snapshot.targets[0].state.last_end_error.as_deref(),
+            Some("network")
+        );
     }
 }

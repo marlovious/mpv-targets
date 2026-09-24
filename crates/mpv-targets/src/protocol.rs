@@ -237,6 +237,20 @@ pub struct TargetState {
     pub audio_track: Option<String>,
     pub subtitle_track: Option<String>,
     pub subtitles_visible: Option<bool>,
+    pub last_end_reason: Option<MediaEndReason>,
+    pub last_end_error: Option<String>,
+}
+
+/// mpv's reported reason for the most recently completed file.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaEndReason {
+    Eof,
+    Stop,
+    Quit,
+    Error,
+    Redirect,
+    Unknown,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

@@ -1,6 +1,6 @@
 use mpv_targets::{
-    DaemonConfig, Event, Health, HealthState, TargetChanged, TargetConfig, TargetRecord,
-    TargetState,
+    DaemonConfig, Event, Health, HealthState, MediaEndReason, TargetChanged, TargetConfig,
+    TargetRecord, TargetState,
 };
 use serde_json::{Value, json};
 use std::{
@@ -21,7 +21,7 @@ use tokio::{
 };
 
 const IPC_WAIT: Duration = Duration::from_secs(5);
-const RECOVERY_ATTEMPTS: u8 = 5;
+const RECOVERY_MAX_DELAY: Duration = Duration::from_secs(30);
 const OBSERVED_PROPERTIES: &[(&str, &str)] = &[
     ("pause", "paused"),
     ("mute", "muted"),
@@ -60,7 +60,120 @@ fn normalize_observed_value(field: &str, value: Value) -> Value {
     {
         return json!(position.floor());
     }
+    if field == "playlist_position" && value.as_i64().is_some_and(|position| position < 0) {
+        return Value::Null;
+    }
     value
+}
+
+fn next_recovery_delay(delay: Duration) -> Duration {
+    delay.saturating_mul(2).min(RECOVERY_MAX_DELAY)
+}
+
+fn apply_observed_update(state: &mut TargetState, field: &str, value: Value) -> Option<Value> {
+    macro_rules! set_observed {
+        ($slot:expr, $next:expr) => {{
+            let slot = &mut $slot;
+            let next = $next;
+            if *slot == next {
+                false
+            } else {
+                *slot = next;
+                true
+            }
+        }};
+    }
+    macro_rules! optional {
+        ($parse:expr) => {
+            if value.is_null() {
+                Some(None)
+            } else {
+                $parse.map(Some)
+            }
+        };
+    }
+    let changed = match field {
+        "paused" => optional!(value.as_bool()).map(|next| set_observed!(state.paused, next)),
+        "muted" => optional!(value.as_bool()).map(|next| set_observed!(state.muted, next)),
+        "volume" => optional!(value.as_f64()).map(|next| set_observed!(state.volume, next)),
+        "title" => optional!(value.as_str())
+            .map(|next| set_observed!(state.title, next.map(str::to_owned))),
+        "playlist_position" => {
+            if value.is_null() {
+                Some(set_observed!(state.playlist_position, None))
+            } else {
+                value
+                    .as_i64()
+                    .and_then(|value| u32::try_from(value).ok())
+                    .map(|next| set_observed!(state.playlist_position, Some(next)))
+            }
+        }
+        "playlist_count" => {
+            if value.is_null() {
+                Some(set_observed!(state.playlist_count, None))
+            } else {
+                value
+                    .as_i64()
+                    .and_then(|value| u32::try_from(value).ok())
+                    .map(|next| set_observed!(state.playlist_count, Some(next)))
+            }
+        }
+        "idle_active" => {
+            optional!(value.as_bool()).map(|next| set_observed!(state.idle_active, next))
+        }
+        "duration" => optional!(value.as_f64()).map(|next| set_observed!(state.duration, next)),
+        "position" => optional!(value.as_f64()).map(|next| set_observed!(state.position, next)),
+        "loop_file" => {
+            if value.is_null() {
+                Some(set_observed!(state.loop_file, None))
+            } else {
+                loop_state(&value).map(|next| set_observed!(state.loop_file, Some(next)))
+            }
+        }
+        "loop_playlist" => {
+            if value.is_null() {
+                Some(set_observed!(state.loop_playlist, None))
+            } else {
+                loop_state(&value).map(|next| set_observed!(state.loop_playlist, Some(next)))
+            }
+        }
+        "audio_track" => {
+            let next = if value.is_null() {
+                Some(None)
+            } else if let Some(value) = value.as_str() {
+                Some(Some(value.to_owned()))
+            } else {
+                value.as_i64().map(|value| Some(value.to_string()))
+            };
+            next.map(|next| set_observed!(state.audio_track, next))
+        }
+        "subtitle_track" => {
+            let next = if value.is_null() {
+                Some(None)
+            } else if let Some(value) = value.as_str() {
+                Some(Some(value.to_owned()))
+            } else {
+                value.as_i64().map(|value| Some(value.to_string()))
+            };
+            next.map(|next| set_observed!(state.subtitle_track, next))
+        }
+        "subtitles_visible" => {
+            optional!(value.as_bool()).map(|next| set_observed!(state.subtitles_visible, next))
+        }
+        _ => None,
+    };
+    changed.filter(|changed| *changed).map(|_| value)
+}
+
+fn media_end_reason(value: Option<&str>) -> MediaEndReason {
+    match value {
+        Some("eof") => MediaEndReason::Eof,
+        Some("stop") => MediaEndReason::Stop,
+        Some("quit") => MediaEndReason::Quit,
+        Some("error") => MediaEndReason::Error,
+        Some("redirect") => MediaEndReason::Redirect,
+        _ => MediaEndReason::Unknown,
+    }
 }
 
 fn mpv_command_values(command: &str, args: &[Value]) -> Vec<Value> {
@@ -100,8 +213,10 @@ fn copy_directory(source: &Path, destination: &Path) -> io::Result<()> {
 #[derive(Clone)]
 pub struct Supervisor {
     inner: Arc<Mutex<Inner>>,
+    mutations: Arc<Mutex<()>>,
     config_path: PathBuf,
     config_root: PathBuf,
+    logs_directory: PathBuf,
     runtime_root: PathBuf,
     changes: broadcast::Sender<Event>,
 }
@@ -118,7 +233,7 @@ struct RuntimeTarget {
     online: bool,
     launching: bool,
     revision: u64,
-    recovery_attempt: u8,
+    recovering: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -168,7 +283,7 @@ impl Supervisor {
                         online: false,
                         launching: false,
                         revision: 0,
-                        recovery_attempt: 0,
+                        recovering: false,
                     },
                 )
             })
@@ -177,11 +292,20 @@ impl Supervisor {
             .map(PathBuf::from)
             .unwrap_or_else(|| config_root.join("runtime"))
             .join("mpv-targets");
+        let logs_directory = std::env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state"))
+            })
+            .unwrap_or_else(|| config_root.join("state"))
+            .join("mpv-targets/logs");
         let (changes, _) = broadcast::channel(128);
         Self {
             inner: Arc::new(Mutex::new(Inner { config, targets })),
+            mutations: Arc::new(Mutex::new(())),
             config_path,
             config_root,
+            logs_directory,
             runtime_root,
             changes,
         }
@@ -277,6 +401,7 @@ impl Supervisor {
         };
         if should_launch && let Err(error) = self.launch(name).await {
             self.clear_launching(name).await;
+            self.schedule_recovery(name.to_owned());
             return Err(error);
         }
         self.target_record(name).await
@@ -370,6 +495,7 @@ impl Supervisor {
         from: Option<&str>,
         enable: bool,
     ) -> Result<TargetRecord, SupervisorError> {
+        let _mutation = self.mutations.lock().await;
         let (target_dir, source_dir, source_channel) = {
             let inner = self.inner.lock().await;
             if inner.targets.contains_key(name) {
@@ -444,7 +570,7 @@ impl Supervisor {
                     online: false,
                     launching: false,
                     revision: 0,
-                    recovery_attempt: 0,
+                    recovering: false,
                 },
             );
             self.emit_snapshot(&inner);
@@ -453,6 +579,7 @@ impl Supervisor {
     }
 
     pub async fn remove(&self, name: &str) -> Result<(), SupervisorError> {
+        let _mutation = self.mutations.lock().await;
         let was_stopped = {
             let inner = self.inner.lock().await;
             inner
@@ -505,6 +632,7 @@ impl Supervisor {
         name: &str,
         replacement: &str,
     ) -> Result<TargetRecord, SupervisorError> {
+        let _mutation = self.mutations.lock().await;
         {
             let inner = self.inner.lock().await;
             let target = inner
@@ -607,12 +735,11 @@ impl Supervisor {
             .await
             .map_err(SupervisorError::Launch)?;
         let target_directory = self.config_root.join("targets").join(name);
-        let logs_directory = self.config_root.join("logs");
-        fs::create_dir_all(&logs_directory).map_err(SupervisorError::Launch)?;
+        fs::create_dir_all(&self.logs_directory).map_err(SupervisorError::Launch)?;
         let log = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(logs_directory.join(format!("{name}.log")))
+            .open(self.logs_directory.join(format!("{name}.log")))
             .map_err(SupervisorError::Launch)?;
         let log_stdout = log.try_clone().map_err(SupervisorError::Launch)?;
         let mut command = Command::new("mpv");
@@ -668,25 +795,26 @@ impl Supervisor {
                 let Some(target) = inner.targets.get_mut(&name) else {
                     return;
                 };
-                if target.config.disabled || target.stopped || target.recovery_attempt != 0 {
+                if target.config.disabled || target.stopped || target.recovering {
                     false
                 } else {
-                    target.recovery_attempt = 1;
+                    target.recovering = true;
                     true
                 }
             };
             if !should_recover {
                 return;
             }
-            for attempt in 1..=RECOVERY_ATTEMPTS {
-                sleep(Duration::from_secs(1_u64 << (attempt - 1))).await;
+            let mut delay = Duration::from_secs(1);
+            loop {
+                sleep(delay).await;
                 let still_expected = {
                     let mut inner = supervisor.inner.lock().await;
                     let Some(target) = inner.targets.get_mut(&name) else {
                         return;
                     };
                     if target.config.disabled || target.stopped {
-                        target.recovery_attempt = 0;
+                        target.recovering = false;
                         false
                     } else {
                         true
@@ -699,10 +827,11 @@ impl Supervisor {
                 if Box::pin(supervisor.start(&name)).await.is_ok() {
                     return;
                 }
-                eprintln!("mpv-targetsd: target `{name}` recovery attempt {attempt} failed");
-                if let Some(target) = supervisor.inner.lock().await.targets.get_mut(&name) {
-                    target.recovery_attempt = attempt.saturating_add(1);
-                }
+                delay = next_recovery_delay(delay);
+                eprintln!(
+                    "mpv-targetsd: target `{name}` recovery launch failed; retrying in {}s",
+                    delay.as_secs()
+                );
             }
         });
     }
@@ -729,6 +858,7 @@ impl Supervisor {
                 changed.insert("online".into(), Value::Bool(false));
             }
             target.launching = false;
+            target.recovering = false;
             if !changed.is_empty() {
                 target.revision += 1;
                 self.emit_changed(name, target.revision, Value::Object(changed));
@@ -775,7 +905,7 @@ impl Supervisor {
             } else {
                 target.online = true;
                 target.launching = false;
-                target.recovery_attempt = 0;
+                target.recovering = false;
                 target.revision += 1;
                 self.emit_changed(name, target.revision, json!({"online": true}));
                 true
@@ -816,6 +946,7 @@ impl Supervisor {
         name: &str,
         mutate: impl FnOnce(&mut TargetConfig) -> Option<Value>,
     ) -> Result<(), SupervisorError> {
+        let _mutation = self.mutations.lock().await;
         {
             let mut inner = self.inner.lock().await;
             let target_index = inner
@@ -912,20 +1043,35 @@ impl Supervisor {
             let Ok(message) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
-            if message.get("event").and_then(Value::as_str) != Some("property-change") {
-                continue;
+            match message.get("event").and_then(Value::as_str) {
+                Some("property-change") => {
+                    let Some(property) = message.get("name").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let Some((_, field)) = OBSERVED_PROPERTIES
+                        .iter()
+                        .find(|(observed, _)| *observed == property)
+                    else {
+                        continue;
+                    };
+                    let value = message.get("data").cloned().unwrap_or(Value::Null);
+                    self.update_observed(&name, field, value).await;
+                }
+                Some("end-file") => {
+                    self.update_media_end(
+                        &name,
+                        media_end_reason(message.get("reason").and_then(Value::as_str)),
+                        message
+                            .get("file_error")
+                            .and_then(Value::as_str)
+                            .filter(|error| !error.is_empty())
+                            .map(str::to_owned),
+                    )
+                    .await;
+                }
+                Some("file-loaded") => self.clear_media_end(&name).await,
+                _ => {}
             }
-            let Some(property) = message.get("name").and_then(Value::as_str) else {
-                continue;
-            };
-            let Some((_, field)) = OBSERVED_PROPERTIES
-                .iter()
-                .find(|(observed, _)| *observed == property)
-            else {
-                continue;
-            };
-            let value = message.get("data").cloned().unwrap_or(Value::Null);
-            self.update_observed(&name, field, value).await;
         }
         self.on_target_lost(name).await;
     }
@@ -936,74 +1082,60 @@ impl Supervisor {
         let Some(target) = inner.targets.get_mut(name) else {
             return;
         };
-        macro_rules! set_observed {
-            ($slot:expr, $next:expr) => {{
-                let slot = &mut $slot;
-                let next = $next;
-                let changed = slot.as_ref() != Some(&next);
-                if changed {
-                    *slot = Some(next);
-                }
-                changed
-            }};
-        }
-        let changed = match field {
-            "paused" => value
-                .as_bool()
-                .map(|value| set_observed!(target.observed.paused, value)),
-            "muted" => value
-                .as_bool()
-                .map(|value| set_observed!(target.observed.muted, value)),
-            "volume" => value
-                .as_f64()
-                .map(|value| set_observed!(target.observed.volume, value)),
-            "title" => value
-                .as_str()
-                .map(|value| set_observed!(target.observed.title, value.to_owned())),
-            "playlist_position" => value
-                .as_i64()
-                .and_then(|value| u32::try_from(value).ok())
-                .map(|value| set_observed!(target.observed.playlist_position, value)),
-            "playlist_count" => value
-                .as_i64()
-                .and_then(|value| u32::try_from(value).ok())
-                .map(|value| set_observed!(target.observed.playlist_count, value)),
-            "idle_active" => value
-                .as_bool()
-                .map(|value| set_observed!(target.observed.idle_active, value)),
-            "duration" => value
-                .as_f64()
-                .map(|value| set_observed!(target.observed.duration, value)),
-            "position" => value
-                .as_f64()
-                .map(|value| set_observed!(target.observed.position, value)),
-            "loop_file" => {
-                loop_state(&value).map(|value| set_observed!(target.observed.loop_file, value))
-            }
-            "loop_playlist" => {
-                loop_state(&value).map(|value| set_observed!(target.observed.loop_playlist, value))
-            }
-            "audio_track" => value
-                .as_i64()
-                .map(|value| set_observed!(target.observed.audio_track, value.to_string())),
-            "subtitle_track" => value
-                .as_i64()
-                .map(|value| set_observed!(target.observed.subtitle_track, value.to_string())),
-            "subtitles_visible" => value
-                .as_bool()
-                .map(|value| set_observed!(target.observed.subtitles_visible, value)),
-            _ => None,
-        };
-        let Some(changed) = changed else {
-            return;
-        };
-        if !changed {
+        if apply_observed_update(&mut target.observed, field, value.clone()).is_none() {
             return;
         }
         target.revision += 1;
         let mut changed_fields = serde_json::Map::new();
         changed_fields.insert(field.to_owned(), value);
         self.emit_changed(name, target.revision, Value::Object(changed_fields));
+    }
+
+    async fn update_media_end(&self, name: &str, reason: MediaEndReason, error: Option<String>) {
+        let (revision, changed) = {
+            let mut inner = self.inner.lock().await;
+            let Some(target) = inner.targets.get_mut(name) else {
+                return;
+            };
+            if target.observed.last_end_reason == Some(reason)
+                && target.observed.last_end_error == error
+            {
+                return;
+            }
+            target.observed.last_end_reason = Some(reason);
+            target.observed.last_end_error = error;
+            target.revision += 1;
+            (
+                target.revision,
+                json!({
+                    "last_end_reason": reason,
+                    "last_end_error": target.observed.last_end_error,
+                }),
+            )
+        };
+        self.emit_changed(name, revision, changed);
+    }
+
+    async fn clear_media_end(&self, name: &str) {
+        let changed = {
+            let mut inner = self.inner.lock().await;
+            let Some(target) = inner.targets.get_mut(name) else {
+                return;
+            };
+            if target.observed.last_end_reason.is_none() && target.observed.last_end_error.is_none()
+            {
+                return;
+            }
+            target.observed.last_end_reason = None;
+            target.observed.last_end_error = None;
+            target.revision += 1;
+            target.revision
+        };
+        self.emit_changed(
+            name,
+            changed,
+            json!({"last_end_reason": null, "last_end_error": null}),
+        );
     }
 
     async fn target_record(&self, name: &str) -> Result<TargetRecord, SupervisorError> {
@@ -1209,6 +1341,55 @@ channel = "/srv/channels/movies.m3u8"
             json!("off")
         );
         assert_eq!(loop_state(&json!("off")).as_deref(), Some("off"));
+    }
+
+    #[test]
+    fn observed_updates_clear_missing_values_and_preserve_mpv_track_values() {
+        let mut state = TargetState {
+            paused: Some(false),
+            playlist_position: Some(4),
+            audio_track: Some("2".into()),
+            subtitle_track: Some("3".into()),
+            ..TargetState::default()
+        };
+
+        assert_eq!(
+            apply_observed_update(&mut state, "paused", Value::Null),
+            Some(Value::Null)
+        );
+        assert_eq!(state.paused, None);
+
+        let position = normalize_observed_value("playlist_position", json!(-1));
+        assert_eq!(
+            apply_observed_update(&mut state, "playlist_position", position),
+            Some(Value::Null)
+        );
+        assert_eq!(state.playlist_position, None);
+
+        assert_eq!(
+            apply_observed_update(&mut state, "audio_track", json!("auto")),
+            Some(json!("auto"))
+        );
+        assert_eq!(state.audio_track.as_deref(), Some("auto"));
+        assert_eq!(
+            apply_observed_update(&mut state, "subtitle_track", json!("no")),
+            Some(json!("no"))
+        );
+        assert_eq!(state.subtitle_track.as_deref(), Some("no"));
+        assert_eq!(
+            apply_observed_update(&mut state, "subtitle_track", Value::Null),
+            Some(Value::Null)
+        );
+        assert_eq!(state.subtitle_track, None);
+    }
+
+    #[test]
+    fn recovery_backoff_caps_without_stopping() {
+        let mut delay = Duration::from_secs(1);
+        for expected in [2, 4, 8, 16, 30, 30, 30] {
+            delay = next_recovery_delay(delay);
+            assert_eq!(delay, Duration::from_secs(expected));
+        }
     }
 
     #[test]

@@ -7,6 +7,8 @@
 #   targets --url wss://192.168.1.50:9876 status
 
 # Optional. "generic" creates the standard portable target layout.
+# Use "hyprland" for a systemd-user target whose mpv windows must wait for
+# an imported Hyprland/Wayland session environment before starting.
 host_profile = "generic"
 
 [node]
