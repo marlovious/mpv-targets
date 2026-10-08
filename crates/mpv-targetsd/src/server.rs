@@ -215,6 +215,16 @@ async fn dispatch_operation(
             let channels = supervisor.list_channels()?;
             Ok(json!({"channels": channels}))
         }
+        Operation::TargetSaveChannel { channel, overwrite } => {
+            let items = supervisor
+                .save_channel(
+                    target.expect("validated target operation"),
+                    &channel,
+                    overwrite,
+                )
+                .await?;
+            Ok(json!({"channel": channel, "items": items}))
+        }
         Operation::TargetRename { name } => {
             let source = target.expect("validated target operation");
             let target = supervisor.rename(source, &name).await?;
@@ -242,6 +252,8 @@ fn error_code(error: &SupervisorError) -> ErrorCode {
             ErrorCode::ConfigRejected
         }
         SupervisorError::TargetExists(_) => ErrorCode::ConfigRejected,
+        SupervisorError::ChannelExists(_) => ErrorCode::ConfigRejected,
+        SupervisorError::InvalidPlaylist => ErrorCode::MpvRejected,
     }
 }
 

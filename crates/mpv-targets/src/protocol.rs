@@ -59,6 +59,10 @@ pub enum Operation {
         channel: Option<String>,
         restart: bool,
     },
+    TargetSaveChannel {
+        channel: String,
+        overwrite: bool,
+    },
     NodeListChannels,
     Mpv {
         command: String,
@@ -93,12 +97,27 @@ impl Operation {
             } if !valid_channel(channel) => {
                 Err(RequestValidationError::InvalidChannel(channel.clone()))
             }
+            Self::TargetSaveChannel { channel, .. } if !valid_channel_name(channel) => {
+                Err(RequestValidationError::InvalidChannelName(channel.clone()))
+            }
             Self::Mpv { command, .. } if !is_allowed_mpv_command(command) => Err(
                 RequestValidationError::NativeCommandNotAllowed(command.clone()),
             ),
             _ => Ok(()),
         }
     }
+}
+
+fn valid_channel_name(value: &str) -> bool {
+    !value.is_empty()
+        && Path::new(value).file_name().and_then(|name| name.to_str()) == Some(value)
+        && is_channel_extension(Path::new(value))
+}
+
+fn is_channel_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "m3u" | "m3u8"))
 }
 
 fn default_true() -> bool {
@@ -292,6 +311,8 @@ pub enum RequestValidationError {
     UnexpectedTarget,
     #[error("channel must be an absolute .m3u/.m3u8 path or URL: {0}")]
     InvalidChannel(String),
+    #[error("channel name must be a single .m3u/.m3u8 filename: {0}")]
+    InvalidChannelName(String),
     #[error("invalid replacement target name: {0}")]
     InvalidReplacement(TargetNameError),
     #[error("base target startup options cannot be used with a source target")]
@@ -399,6 +420,27 @@ mod tests {
     }
 
     #[test]
+    fn save_channel_accepts_only_managed_channel_filenames() {
+        let request = Request {
+            id: "save".into(),
+            target: Some("music".into()),
+            operation: Operation::TargetSaveChannel {
+                channel: "set.m3u8".into(),
+                overwrite: false,
+            },
+        };
+        assert!(request.validate().is_ok());
+        for invalid in ["set", "/tmp/set.m3u", "../set.m3u", "folder/set.m3u"] {
+            let mut request = request.clone();
+            request.operation = Operation::TargetSaveChannel {
+                channel: invalid.into(),
+                overwrite: false,
+            };
+            assert!(request.validate().is_err(), "accepted {invalid}");
+        }
+    }
+
+    #[test]
     fn channel_catalog_request_is_the_only_targetless_operation() {
         let request = Request {
             id: "client-44".into(),
@@ -467,6 +509,13 @@ mod tests {
                     restart: false,
                 },
                 json!({"kind": "target_set_channel", "channel": null, "restart": false}),
+            ),
+            (
+                Operation::TargetSaveChannel {
+                    channel: "set.m3u".into(),
+                    overwrite: false,
+                },
+                json!({"kind": "target_save_channel", "channel": "set.m3u", "overwrite": false}),
             ),
             (
                 Operation::NodeListChannels,

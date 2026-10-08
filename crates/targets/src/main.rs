@@ -60,6 +60,7 @@ async fn run() -> Result<(), String> {
         }
         "playlist" => playlist(&client, &args).await,
         "show-channels" => show_channels(&client).await,
+        "save-channel" => save_channel(&client, &args).await,
         "set-channel" | "clear-channel" => channel(&client, &command, &args).await,
         "play" | "pause" | "toggle-play" | "loadfile" | "append" | "next" | "previous" | "mute"
         | "unmute" | "toggle-mute" | "fullscreen" | "loop" | "repeat" | "shuffle" | "unshuffle"
@@ -190,6 +191,10 @@ fn validate_command_args(command: &str, args: &[String]) -> Result<(), String> {
         "enable" => valid_target_list(args, false, Some("--start")),
         "disable" => valid_target_list(args, false, None),
         "show-channels" => exact(&[&[]]),
+        "save-channel" => exact(&[
+            &["<target>", "<channel>"],
+            &["<target>", "<channel>", "--yes"],
+        ]),
         "set-channel" => exact(&[
             &["<target>", "<channel>"],
             &["<target>", "<channel>", "--restart"],
@@ -416,6 +421,33 @@ async fn rename_target(client: &RemoteClient, args: &[String]) -> Result<(), Str
     Ok(())
 }
 
+async fn save_channel(client: &RemoteClient, args: &[String]) -> Result<(), String> {
+    let target = args.first().ok_or("target is required")?;
+    let channel = args.get(1).ok_or("channel name is required")?;
+    let exists = client
+        .list_channels()
+        .await
+        .map_err(|e| e.to_string())?
+        .channels
+        .iter()
+        .any(|existing| channel_display_name(existing) == channel);
+    let overwrite =
+        exists && (args.iter().any(|arg| arg == "--yes") || confirm_channel_overwrite(channel)?);
+    if exists && !overwrite {
+        return Ok(());
+    }
+    let result = client
+        .target(target)
+        .save_channel(channel.clone(), overwrite)
+        .await
+        .map_err(|e| e.to_string())?;
+    println!(
+        "{} :: [Save Channel] :: [{} items]",
+        result.channel, result.items
+    );
+    Ok(())
+}
+
 async fn identify(client: &RemoteClient, args: &[String]) -> Result<(), String> {
     if let Some(node) = args.first()
         && !node.starts_with('@')
@@ -487,6 +519,20 @@ fn confirm_remove(target: &str) -> Result<bool, String> {
     }
     print_work_receipt("Remove", &format!("target {target}"));
     print!("This removes its target directory. Continue? [y/N] ");
+    io::stdout().flush().map_err(|e| e.to_string())?;
+    let mut answer = String::new();
+    io::stdin()
+        .read_line(&mut answer)
+        .map_err(|e| e.to_string())?;
+    Ok(matches!(answer.trim(), "y" | "Y"))
+}
+
+fn confirm_channel_overwrite(channel: &str) -> Result<bool, String> {
+    use std::io::{self, IsTerminal, Write};
+    if !io::stdin().is_terminal() {
+        return Err("overwriting a channel non-interactively requires --yes".into());
+    }
+    print!("Overwrite {channel}? [y/N] ");
     io::stdout().flush().map_err(|e| e.to_string())?;
     let mut answer = String::new();
     io::stdin()
@@ -923,7 +969,7 @@ fn take_option(args: &mut Vec<String>, option: &str) -> Result<Option<String>, S
 }
 fn print_help() {
     println!(
-        "targets [--url WSS_URL] <command> [@node] ...\n\nstatus [@node] [target] [--json]\nadd [@node] <target> [--from TARGET] [--channel NAME_OR_PATH_OR_URL] [--enable] [--start]\nremove [@node] <target> [--yes]\nstart|stop|restart [@node] <target...|all>\nenable [@node] <target...> [--start]\ndisable [@node] <target...>\nrename [@node] <target> <new-target> [--yes]\nshow-channels [@node]  list files in the node channel directory\nset-channel [@node] <target> <number|name|path-or-url> [--restart]  select the target channel\nclear-channel [@node] <target> [--restart]  clear the target channel\nplaylist [@node] <target> [item]  show or jump the current mpv playlist\nplay|pause|toggle-play [@node] <target...|all>\nloadfile [@node] <target> <path-or-url>\nappend [@node] <target> <path-or-url>\nnext|previous [@node] <target...>\nmute [@node] <target...|all>\nunmute|toggle-mute [@node] <target...>\nloop|repeat|shuffle|unshuffle [@node] <target...>\nfullscreen|cycle-audio|cycle-subtitle|toggle-subtitle [@node] <target>\nidentify [@node]\nmpv [@node] <target> <allowed-native-command> [args...]"
+        "targets [--url WSS_URL] <command> [@node] ...\n\nstatus [@node] [target] [--json]\nadd [@node] <target> [--from TARGET] [--channel NAME_OR_PATH_OR_URL] [--enable] [--start]\nremove [@node] <target> [--yes]\nstart|stop|restart [@node] <target...|all>\nenable [@node] <target...> [--start]\ndisable [@node] <target...>\nrename [@node] <target> <new-target> [--yes]\nshow-channels [@node]  list files in the node channel directory\nsave-channel [@node] <target> <name.m3u> [--yes]  save the live queue in current order\nset-channel [@node] <target> <number|name|path-or-url> [--restart]  select the target channel\nclear-channel [@node] <target> [--restart]  clear the target channel\nplaylist [@node] <target> [item]  show or jump the current mpv playlist\nplay|pause|toggle-play [@node] <target...|all>\nloadfile [@node] <target> <path-or-url>\nappend [@node] <target> <path-or-url>\nnext|previous [@node] <target...>\nmute [@node] <target...|all>\nunmute|toggle-mute [@node] <target...>\nloop|repeat|shuffle|unshuffle [@node] <target...>\nfullscreen|cycle-audio|cycle-subtitle|toggle-subtitle [@node] <target>\nidentify [@node]\nmpv [@node] <target> <allowed-native-command> [args...]"
     );
 }
 

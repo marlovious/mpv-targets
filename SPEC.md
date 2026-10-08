@@ -372,12 +372,19 @@ target_enable
 target_disable
 target_rename
 target_set_channel
+target_save_channel
 node_list_channels
 ```
 
 `target_set_channel` carries `channel` (a string or `null`) and an explicit
 `restart` boolean. Its success data reports the persisted channel,
 whether restart was requested, and whether restart completed.
+
+`target_save_channel` carries a single managed `.m3u` or `.m3u8` filename and
+an explicit `overwrite` boolean. It snapshots the target's complete live mpv
+playlist in current order and writes it atomically beneath the node's shared
+`channels/` directory. It never changes the target's selected channel. Its
+success data reports the channel filename and item count.
 
 `target_add` may carry `from`, naming an existing target on the same node. The
 new target copies that target's `mpv.conf`, scripts, and selected channel
@@ -605,6 +612,7 @@ targets disable [@node] <target...>
 targets rename [@node] <target> <new-target>
 
 targets show-channels [@node]
+targets save-channel [@node] <target> <name.m3u|name.m3u8> [--yes]
 targets set-channel [@node] <target> <number|name|path-or-url> [--restart]
 targets clear-channel [@node] <target> [--restart]
 
@@ -665,6 +673,11 @@ or an explicit external absolute M3U path or URL. `clear-channel` removes the
 target's persistent channel assignment. A target without a selected channel
 still starts and remains idle. These commands do not inspect or edit M3U
 contents. A successful set receipt includes the selected channel filename.
+
+`save-channel` writes the target's complete live playlist, in its current
+order, to a named file in the node's managed channel directory. It does not
+assign that channel to the target. Existing files require interactive
+confirmation; non-interactive overwrite requires `--yes`.
 
 `toggle-play all` is intentionally node-wide: if every selected target is
 paused it plays them all; otherwise it pauses them all.

@@ -14,8 +14,8 @@ pub use answer::{AnswerError, AnswerFile, AnswerTarget, AnswerTls, ServiceAnswer
 pub use client::{
     AddTargetResult, ChannelCatalog, ChannelMutationResult, ClientError, ClientOptions,
     DisconnectReason, EnableResult, LifecycleResult, LoadMode, LoopState, PlaylistItem,
-    RemoteClient, RemoveTargetResult, RenameTargetResult, TargetClient, TargetStatus, Track,
-    target_status,
+    RemoteClient, RemoveTargetResult, RenameTargetResult, SaveChannelResult, TargetClient,
+    TargetStatus, Track, target_status,
 };
 
 /// The ordinary target baseline used when no source configuration is supplied.

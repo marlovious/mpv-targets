@@ -130,6 +130,12 @@ pub struct ChannelCatalog {
 }
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq)]
+pub struct SaveChannelResult {
+    pub channel: String,
+    pub items: usize,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq)]
 pub struct PlaylistItem {
     pub id: u64,
     pub filename: String,
@@ -565,6 +571,20 @@ impl TargetClient {
         decode_success(
             self.request(Operation::TargetSetChannel { channel, restart })
                 .await?,
+        )
+    }
+
+    pub async fn save_channel(
+        &self,
+        channel: impl Into<String>,
+        overwrite: bool,
+    ) -> Result<SaveChannelResult, ClientError> {
+        decode_success(
+            self.request(Operation::TargetSaveChannel {
+                channel: channel.into(),
+                overwrite,
+            })
+            .await?,
         )
     }
 

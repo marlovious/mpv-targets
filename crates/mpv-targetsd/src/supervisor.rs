@@ -260,6 +260,10 @@ pub enum SupervisorError {
     ConfigSerialization(#[source] toml::ser::Error),
     #[error("target already exists: {0}")]
     TargetExists(String),
+    #[error("channel already exists: {0}")]
+    ChannelExists(String),
+    #[error("mpv returned an invalid playlist")]
+    InvalidPlaylist,
 }
 
 impl Supervisor {
@@ -706,6 +710,42 @@ impl Supervisor {
         }
         channels.sort();
         Ok(channels)
+    }
+
+    pub async fn save_channel(
+        &self,
+        target: &str,
+        channel: &str,
+        overwrite: bool,
+    ) -> Result<usize, SupervisorError> {
+        let _mutation = self.mutations.lock().await;
+        let playlist = self
+            .mpv_command(target, "get_property", &[json!("playlist")])
+            .await?;
+        let (contents, items) = playlist_m3u(&playlist)?;
+
+        let directory = self.config_root.join("channels");
+        fs::create_dir_all(&directory).map_err(SupervisorError::Config)?;
+        let path = directory.join(channel);
+        if !overwrite && path.exists() {
+            return Err(SupervisorError::ChannelExists(channel.into()));
+        }
+        let temporary = directory.join(format!(".{channel}.tmp-{}", std::process::id()));
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)
+            .map_err(SupervisorError::Config)?;
+        if let Err(error) = (|| -> io::Result<()> {
+            file.write_all(contents.as_bytes())?;
+            file.sync_all()?;
+            fs::rename(&temporary, &path)?;
+            Ok(())
+        })() {
+            let _ = fs::remove_file(&temporary);
+            return Err(SupervisorError::Config(error));
+        }
+        Ok(items)
     }
 
     pub async fn mpv_command(
@@ -1270,6 +1310,23 @@ fn is_channel_path(path: &Path) -> bool {
         .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "m3u" | "m3u8"))
 }
 
+fn playlist_m3u(playlist: &Value) -> Result<(String, usize), SupervisorError> {
+    let entries = playlist
+        .as_array()
+        .ok_or(SupervisorError::InvalidPlaylist)?;
+    let mut contents = String::from("#EXTM3U\n");
+    for entry in entries {
+        let filename = entry
+            .get("filename")
+            .and_then(Value::as_str)
+            .filter(|filename| !filename.contains(['\n', '\r']))
+            .ok_or(SupervisorError::InvalidPlaylist)?;
+        contents.push_str(filename);
+        contents.push('\n');
+    }
+    Ok((contents, entries.len()))
+}
+
 #[allow(dead_code)]
 fn _portable_unix_only(_: &Path) {}
 
@@ -1431,5 +1488,19 @@ channel = "/srv/channels/movies.m3u8"
         assert!(is_channel_path(Path::new("cameras.M3U8")));
         assert!(!is_channel_path(Path::new("movie.mkv")));
         assert!(!is_channel_path(Path::new("playlist")));
+    }
+
+    #[test]
+    fn saved_channel_preserves_exact_playlist_order() {
+        let (contents, items) = playlist_m3u(&json!([
+            {"filename": "https://example.test/two"},
+            {"filename": "/media/one.mp4", "current": true}
+        ]))
+        .unwrap();
+        assert_eq!(
+            contents,
+            "#EXTM3U\nhttps://example.test/two\n/media/one.mp4\n"
+        );
+        assert_eq!(items, 2);
     }
 }
