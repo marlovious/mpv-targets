@@ -145,9 +145,16 @@ async fn dispatch_operation(
 ) -> Result<Value, SupervisorError> {
     let target = request.target.as_deref();
     match request.operation {
-        Operation::TargetAdd { from, enable } => {
+        Operation::TargetAdd {
+            from,
+            enable,
+            start_paused,
+            start_muted,
+        } => {
             let target = target.expect("validated target operation");
-            let target = supervisor.add(target, from.as_deref(), enable).await?;
+            let target = supervisor
+                .add(target, from.as_deref(), enable, start_paused, start_muted)
+                .await?;
             let copied = if from.is_some() {
                 vec!["mpv.conf", "scripts/"]
             } else {

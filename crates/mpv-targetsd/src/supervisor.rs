@@ -494,6 +494,8 @@ impl Supervisor {
         name: &str,
         from: Option<&str>,
         enable: bool,
+        start_paused: bool,
+        start_muted: bool,
     ) -> Result<TargetRecord, SupervisorError> {
         let _mutation = self.mutations.lock().await;
         let (target_dir, source_dir, source_channel) = {
@@ -529,7 +531,7 @@ impl Supervisor {
             } else {
                 fs::write(
                     target_dir.join("mpv.conf"),
-                    mpv_targets::base_mpv_conf(true, true, 100.0),
+                    mpv_targets::base_mpv_conf(start_paused, start_muted, 100.0),
                 )?;
             }
             Ok(())
@@ -1305,11 +1307,22 @@ channel = "/srv/channels/movies.m3u8"
         fs::write(&config_path, toml::to_string_pretty(&config).unwrap()).unwrap();
         let supervisor = Supervisor::new(config, config_path);
 
-        let added = supervisor.add("copy", Some("source"), false).await.unwrap();
+        let added = supervisor
+            .add("copy", Some("source"), false, true, true)
+            .await
+            .unwrap();
 
         assert_eq!(added.channel.as_deref(), Some("/srv/channels/movies.m3u8"));
         let persisted = fs::read_to_string(root.join("mpv-targets.toml")).unwrap();
         assert!(persisted.contains("channel = \"/srv/channels/movies.m3u8\""));
+
+        supervisor
+            .add("base", None, false, false, false)
+            .await
+            .unwrap();
+        let base_config = fs::read_to_string(root.join("targets/base/mpv.conf")).unwrap();
+        assert!(base_config.contains("pause=no"));
+        assert!(base_config.contains("mute=no"));
 
         let disabled = supervisor.disable("source").await.unwrap();
         assert!(disabled.disabled);

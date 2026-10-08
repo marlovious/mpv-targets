@@ -27,9 +27,27 @@ pub fn base_mpv_conf(start_paused: bool, start_muted: bool, volume: f64) -> Stri
         if start_muted { "yes" } else { "no" },
     )
 }
+
+/// The canonical short label for a channel catalog value.
+pub fn channel_display_name(channel: &str) -> &str {
+    channel.rsplit('/').next().unwrap_or(channel)
+}
 pub use config::{ConfigError, DaemonConfig, TargetConfig, TlsConfig};
 pub use protocol::{
     ErrorCode, ErrorResponse, Event, Health, HealthState, MediaEndReason, MpvOperation, Operation,
     Request, Response, ServiceOperation, Snapshot, TargetChanged, TargetRecord, TargetState,
 };
 pub use tls::{TlsMaterialError, server_tls_config};
+
+#[cfg(test)]
+mod tests {
+    use super::channel_display_name;
+
+    #[test]
+    fn channel_display_uses_only_the_catalog_filename() {
+        assert_eq!(
+            channel_display_name("/srv/channels/cameras.m3u8"),
+            "cameras.m3u8"
+        );
+    }
+}

@@ -131,6 +131,7 @@ pub struct ChannelCatalog {
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq)]
 pub struct PlaylistItem {
+    pub id: u64,
     pub filename: String,
     #[serde(default)]
     pub title: Option<String>,
@@ -501,7 +502,31 @@ impl TargetClient {
         from: Option<String>,
         enable: bool,
     ) -> Result<AddTargetResult, ClientError> {
-        decode_success(self.request(Operation::TargetAdd { from, enable }).await?)
+        decode_success(
+            self.request(Operation::TargetAdd {
+                from,
+                enable,
+                start_paused: true,
+                start_muted: true,
+            })
+            .await?,
+        )
+    }
+    pub async fn add_base(
+        &self,
+        enable: bool,
+        start_paused: bool,
+        start_muted: bool,
+    ) -> Result<AddTargetResult, ClientError> {
+        decode_success(
+            self.request(Operation::TargetAdd {
+                from: None,
+                enable,
+                start_paused,
+                start_muted,
+            })
+            .await?,
+        )
     }
     pub async fn remove_target(&self) -> Result<RemoveTargetResult, ClientError> {
         decode_success(self.request(Operation::TargetRemove).await?)
@@ -680,6 +705,13 @@ impl TargetClient {
     pub async fn fullscreen(&self) -> Result<Response, ClientError> {
         self.mpv("cycle", vec![serde_json::json!("fullscreen")])
             .await
+    }
+    pub async fn set_fullscreen(&self, enabled: bool) -> Result<Response, ClientError> {
+        self.mpv(
+            "set_property",
+            vec![serde_json::json!("fullscreen"), serde_json::json!(enabled)],
+        )
+        .await
     }
     pub async fn set_loop(&self, state: LoopState) -> Result<Response, ClientError> {
         self.mpv(
@@ -1180,6 +1212,25 @@ mod tests {
                 channel: Some("/srv/channels/music.m3u8".into()),
                 copied: vec!["mpv.conf".into()],
             }
+        );
+
+        let response = Response::Success {
+            id: "playlist".into(),
+            data: json!([{
+                "id": 42,
+                "filename": "https://example.test/live.m3u8",
+                "title": "Live",
+                "current": true
+            }]),
+        };
+        assert_eq!(
+            decode_success::<Vec<PlaylistItem>>(response).unwrap(),
+            vec![PlaylistItem {
+                id: 42,
+                filename: "https://example.test/live.m3u8".into(),
+                title: Some("Live".into()),
+                current: true,
+            }]
         );
     }
 

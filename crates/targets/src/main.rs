@@ -1,6 +1,6 @@
 use mpv_targets::{
     ClientOptions, DaemonConfig, LoadMode, LoopState, Operation, PlaylistItem, RemoteClient,
-    Response, target_status,
+    Response, channel_display_name, target_status,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -710,18 +710,10 @@ async fn show_channels(client: &RemoteClient) -> Result<(), String> {
     clear_interactive_terminal();
     println!(":: [Channels] ::\n");
     for (index, path) in channels.iter().enumerate() {
-        let name = PathBuf::from(path)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(path)
-            .to_owned();
+        let name = channel_display_name(path);
         println!("{}. {name}", index + 1);
     }
     Ok(())
-}
-
-fn channel_display_name(channel: &str) -> &str {
-    channel.rsplit('/').next().unwrap_or(channel)
 }
 
 async fn resolve_channel(client: &RemoteClient, value: &str) -> Result<String, String> {
@@ -946,16 +938,19 @@ mod tests {
     #[test]
     fn playlist_display_matches_panebot_fallback() {
         let titled = PlaylistItem {
+            id: 1,
             filename: "/media/raw.mkv".into(),
             title: Some("Display title".into()),
             current: false,
         };
         let local = PlaylistItem {
+            id: 2,
             filename: "/media/video/movie.mkv".into(),
             title: None,
             current: false,
         };
         let remote = PlaylistItem {
+            id: 3,
             filename: "https://example.test/live/index.m3u8".into(),
             title: None,
             current: false,

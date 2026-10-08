@@ -383,6 +383,13 @@ whether restart was requested, and whether restart completed.
 new target copies that target's `mpv.conf`, scripts, and selected channel
 reference. It does not copy lifecycle state or channel files.
 
+Without `from`, `target_add` may carry the typed base-configuration booleans
+`start_paused` and `start_muted`. Both default to `true` when omitted for wire
+compatibility. The daemon passes them only to its canonical `base_mpv_conf`
+generator; the operation does not accept arbitrary mpv options or configuration
+text. Non-default base options are invalid with `from`, whose copied `mpv.conf`
+remains authoritative and unfiltered.
+
 `node_list_channels` returns the sorted managed channels from the node's shared
 `channels/` directory. It is the only v1 operation without a target.
 
@@ -532,7 +539,7 @@ common mpv client surface:
 - load file/list/URL, replace, append, and append-play;
 - play, pause, stop playback, next, previous, seek, and playlist selection;
 - playlist clear, remove, move/reorder, shuffle, and unshuffle;
-- deterministic play, pause, mute, unmute, volume, fullscreen, loop, and
+- deterministic play, pause, mute, unmute, volume, fullscreen state, loop, and
   repeat controls, plus explicit playback and mute toggles;
 - audio and subtitle select, disable, cycle, and visibility toggle;
 - transient OSD text;
@@ -540,8 +547,9 @@ common mpv client surface:
 - every service operation in section 8.2.
 
 Stable service results, channel catalogs, and playlist items have public typed
-representations. The raw request/result escape hatch remains available. The
-library also provides the canonical derived display status precedence
+representations. Typed playlist items retain mpv's stable item ID, filename,
+optional title, and current-item marker. The raw request/result escape hatch
+remains available. The library also provides the canonical derived display status precedence
 `disabled -> stopped -> offline -> idle -> paused -> playing`; this is a view
 of snapshot fields, not an additional daemon lifecycle state.
 

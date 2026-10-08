@@ -41,6 +41,10 @@ pub enum Operation {
     TargetAdd {
         from: Option<String>,
         enable: bool,
+        #[serde(default = "default_true", skip_serializing_if = "is_true")]
+        start_paused: bool,
+        #[serde(default = "default_true", skip_serializing_if = "is_true")]
+        start_muted: bool,
     },
     TargetRemove,
     TargetStart,
@@ -66,9 +70,17 @@ pub enum Operation {
 impl Operation {
     pub fn validate(&self) -> Result<(), RequestValidationError> {
         match self {
-            Self::TargetAdd { from, .. } => {
+            Self::TargetAdd {
+                from,
+                start_paused,
+                start_muted,
+                ..
+            } => {
                 if let Some(source) = from {
                     validate_target_name(source).map_err(RequestValidationError::InvalidTarget)?;
+                    if !start_paused || !start_muted {
+                        return Err(RequestValidationError::BaseOptionsWithSource);
+                    }
                 }
                 Ok(())
             }
@@ -87,6 +99,14 @@ impl Operation {
             _ => Ok(()),
         }
     }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 pub(crate) fn valid_channel(value: &str) -> bool {
@@ -274,6 +294,8 @@ pub enum RequestValidationError {
     InvalidChannel(String),
     #[error("invalid replacement target name: {0}")]
     InvalidReplacement(TargetNameError),
+    #[error("base target startup options cannot be used with a source target")]
+    BaseOptionsWithSource,
     #[error("native mpv command is not allowed: {0}")]
     NativeCommandNotAllowed(String),
 }
@@ -575,12 +597,57 @@ mod tests {
             operation: Operation::TargetAdd {
                 from: Some("cameras".into()),
                 enable: false,
+                start_paused: true,
+                start_muted: true,
             },
         };
         assert!(request.validate().is_ok());
         assert_eq!(
             serde_json::to_value(request.operation).unwrap(),
             json!({"kind": "target_add", "from": "cameras", "enable": false})
+        );
+    }
+
+    #[test]
+    fn add_operation_accepts_base_startup_options_without_a_source() {
+        let request = Request {
+            id: "add-2".into(),
+            target: Some("footage".into()),
+            operation: Operation::TargetAdd {
+                from: None,
+                enable: true,
+                start_paused: false,
+                start_muted: false,
+            },
+        };
+        assert!(request.validate().is_ok());
+        assert_eq!(
+            serde_json::to_value(request.operation).unwrap(),
+            json!({
+                "kind": "target_add",
+                "from": null,
+                "enable": true,
+                "start_paused": false,
+                "start_muted": false
+            })
+        );
+    }
+
+    #[test]
+    fn add_operation_rejects_base_startup_options_with_a_source() {
+        let request = Request {
+            id: "add-3".into(),
+            target: Some("footage".into()),
+            operation: Operation::TargetAdd {
+                from: Some("cameras".into()),
+                enable: false,
+                start_paused: false,
+                start_muted: true,
+            },
+        };
+        assert_eq!(
+            request.validate(),
+            Err(RequestValidationError::BaseOptionsWithSource)
         );
     }
 }
