@@ -753,14 +753,11 @@ async fn channel_entries(client: &RemoteClient) -> Result<Vec<String>, String> {
 async fn playlist(client: &RemoteClient, args: &[String]) -> Result<(), String> {
     let target = args.first().ok_or("target is required")?;
     if let Some(item) = args.get(1) {
-        let index: u64 = item.parse().map_err(|_| "playlist item must be a number")?;
-        if index == 0 {
-            return Err("playlist numbering starts at 1".into());
-        }
+        let index: u32 = item.parse().map_err(|_| "playlist item must be a number")?;
         return print_target_response(
             client
                 .target(target)
-                .playlist_play((index - 1) as u32)
+                .playlist_play(index)
                 .await
                 .map_err(|e| e.to_string())?,
             target,
@@ -780,7 +777,7 @@ async fn playlist(client: &RemoteClient, args: &[String]) -> Result<(), String> 
         let marker = if entry.current { ">" } else { " " };
         let title = playlist_item_display(entry);
         let title = truncate_text(title, 72);
-        if let Err(error) = writeln!(stdout, "{marker} {:>3} {title}", index + 1) {
+        if let Err(error) = writeln!(stdout, "{marker} {index:>3} {title}") {
             if error.kind() == io::ErrorKind::BrokenPipe {
                 return Ok(());
             }

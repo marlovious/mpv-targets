@@ -692,7 +692,8 @@ exists on that target, such as its normalized rclone/FUSE mount path.
 interrupting the current item. Both commands operate on one target.
 
 `playlist <target>` prints the target's current playlist as a compact,
-one-based numbered list, marking the current item. `playlist <target> <item>`
+zero-based numbered list matching mpv, marking the current item.
+`playlist <target> <item>`
 selects that item and begins playback. It is intentionally a view/jump tool,
 not an interactive picker or playlist editor.
 
@@ -859,7 +860,7 @@ no v2 source file is a required implementation dependency.
 - Snapshots and incremental events report online, stopped, disabled, playback,
   mute, title, playlist, audio/subtitle, loop, repeat, and the most recent
   mpv file-end outcome correctly.
-- Playlist listing/jump uses one-based operator numbering and starts the chosen
+- Playlist listing/jump uses mpv's zero-based numbering and starts the chosen
   item.
 
 #### Protocol and clients
