@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="330" viewBox="0 0 1240 330" role="img" aria-labelledby="title description">
+  <title id="title">mpv-targets status output</title>
+  <desc id="description">A terminal showing four named targets with playing, paused, idle, and disabled states.</desc>
+  <rect width="1240" height="330" rx="12" fill="#0b1114"/>
+  <rect width="1240" height="38" rx="12" fill="#182126"/>
+  <rect y="27" width="1240" height="11" fill="#182126"/>
+  <circle cx="22" cy="19" r="6" fill="#e05b52"/>
+  <circle cx="42" cy="19" r="6" fill="#e0a34a"/>
+  <circle cx="62" cy="19" r="6" fill="#59b36a"/>
+  <text x="620" y="24" text-anchor="middle" fill="#91a3aa" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">example targets status</text>
+  <g fill="#d7e0e3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16">
+    <text x="24" y="72">$ targets status @living-room</text>
+    <text x="24" y="104" fill="#e08030">NODE::living-room [living-room.example.net:9876] :: TARGETS ::3/4</text>
+    <text x="24" y="130" fill="#50636b">====================================================================================================</text>
+    <text x="24" y="168">"CAMERAS"        :: [Playing ] :: [Vol:Mute] :: [Loop:Off] :: [Repeat:On ] :: Bay Bridge — Westbound</text>
+    <text x="24" y="202">"MOVIES"         :: [Paused  ] :: [Vol: 80 ] :: [Loop:Off] :: [Repeat:Off] :: The Conversation</text>
+    <text x="24" y="236">"MUSIC"          :: [Idle    ] :: [Vol: 65 ] :: [Loop:Off] :: [Repeat:Off] :: -</text>
+    <text x="24" y="270">"SIGNAGE"        :: [Disabled] :: [Vol:  ? ] :: [Loop:Off] :: [Repeat:Off] :: -</text>
+    <text x="24" y="306" fill="#91a3aa">$</text>
+  </g>
+</svg>
