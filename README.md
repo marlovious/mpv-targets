@@ -11,7 +11,7 @@ mpv remains the player. This project supplies target lifecycle, recovery,
 observable playback state, and a common control protocol. It is not a media
 library, downloader, CMS, or NVR.
 
-![Example targets status output](assets/targets-status.svg)
+![Example targets status output](assets/targets-status.png)
 
 The project provides:
 
