@@ -8,7 +8,7 @@
   <circle cx="42" cy="19" r="6" fill="#e0a34a"/>
   <circle cx="62" cy="19" r="6" fill="#59b36a"/>
   <text x="620" y="24" text-anchor="middle" fill="#91a3aa" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">example targets status</text>
-  <g fill="#d7e0e3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16">
+  <g fill="#d7e0e3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16" xml:space="preserve">
     <text x="24" y="72">$ targets status @living-room</text>
     <text x="24" y="104" fill="#e08030">NODE::living-room [living-room.example.net:9876] :: TARGETS ::3/4</text>
     <text x="24" y="130" fill="#50636b">====================================================================================================</text>
